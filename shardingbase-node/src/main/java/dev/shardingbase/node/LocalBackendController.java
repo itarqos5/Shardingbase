@@ -100,6 +100,8 @@ final class LocalBackendController implements AutoCloseable {
                 output.writeInt(ShardingbaseProtocol.VERSION);
                 output.writeBoolean(response.accepted());
                 writeField(output, response.detail());
+                writeField(output, response.peerId());
+                writeField(output, response.peerName());
                 output.flush();
             }
         } catch (final IOException exception) {

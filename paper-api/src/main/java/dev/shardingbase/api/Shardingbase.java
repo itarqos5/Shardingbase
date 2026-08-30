@@ -1,6 +1,7 @@
 package dev.shardingbase.api;
 
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import org.jetbrains.annotations.ApiStatus;
@@ -42,6 +43,8 @@ public final class Shardingbase {
 
     private static final class UnavailableService implements ShardingbaseService {
         private static final ServerIdentity IDENTITY = new ServerIdentity("unavailable", "unavailable");
+        private static final PeerStatus PEER = new PeerStatus(false, "", "", "Shardingbase is unavailable");
+        private static final RemoteOperations REMOTE_OPERATIONS = new UnavailableRemoteOperations();
 
         @Override
         public ServerIdentity identity() {
@@ -59,8 +62,49 @@ public final class Shardingbase {
         }
 
         @Override
+        public PeerStatus peerStatus() {
+            return PEER;
+        }
+
+        @Override
+        public Ownership ownership(final WorldPosition position) {
+            return Ownership.UNSHARDED;
+        }
+
+        @Override
+        public RemoteOperations remoteOperations() {
+            return REMOTE_OPERATIONS;
+        }
+
+        @Override
         public CompletionStage<ReloadResult> reload() {
             return CompletableFuture.completedFuture(new ReloadResult(false, this.statusDetail()));
+        }
+    }
+
+    private static final class UnavailableRemoteOperations implements RemoteOperations {
+        @Override
+        public CompletionStage<RemoteResult<BlockSnapshot>> readBlock(final WorldPosition position) {
+            return unavailable();
+        }
+
+        @Override
+        public CompletionStage<RemoteResult<Void>> setBlockData(final WorldPosition position, final String blockData) {
+            return unavailable();
+        }
+
+        @Override
+        public CompletionStage<RemoteResult<Boolean>> breakBlock(final WorldPosition position) {
+            return unavailable();
+        }
+
+        @Override
+        public CompletionStage<RemoteResult<UUID>> spawnEntity(final EntitySpawn spawn) {
+            return unavailable();
+        }
+
+        private static <T> CompletionStage<RemoteResult<T>> unavailable() {
+            return CompletableFuture.completedFuture(new RemoteResult.Unavailable<>("Shardingbase is unavailable"));
         }
     }
 }

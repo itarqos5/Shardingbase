@@ -1,8 +1,15 @@
 package dev.shardingbase.server;
 
 import dev.shardingbase.api.FeatureState;
+import dev.shardingbase.api.BlockSnapshot;
+import dev.shardingbase.api.EntitySpawn;
+import dev.shardingbase.api.Ownership;
+import dev.shardingbase.api.PeerStatus;
+import dev.shardingbase.api.RemoteOperations;
+import dev.shardingbase.api.RemoteResult;
 import dev.shardingbase.api.ServerIdentity;
 import dev.shardingbase.api.ShardingbaseService;
+import dev.shardingbase.api.WorldPosition;
 import dev.shardingbase.server.config.ShardingbaseConfiguration;
 import dev.shardingbase.server.config.ShardingbaseConfigurationException;
 import dev.shardingbase.server.config.ShardingbaseConfigurationLoader;
@@ -19,6 +26,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -40,6 +48,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     private volatile @Nullable ScheduledFuture<?> retryTask;
     private volatile Runnable menuReloader = () -> {
     };
+    private final RemoteOperations remoteOperations = new DisabledRemoteOperations();
 
     /**
      * Loads and starts a runtime rooted at the server directory.
@@ -81,7 +90,8 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         this.snapshot = new AtomicReference<>(new Snapshot(
             configuration.identity(),
             FeatureState.PENDING,
-            "waiting for local node and Velocity validation"
+            "waiting for local node and Velocity validation",
+            new PeerStatus(false, "", "", "peer is not validated")
         ));
         this.beginValidation(configuration.identity());
     }
@@ -99,6 +109,21 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     @Override
     public String statusDetail() {
         return this.snapshot.get().detail();
+    }
+
+    @Override
+    public PeerStatus peerStatus() {
+        return this.snapshot.get().peerStatus();
+    }
+
+    @Override
+    public Ownership ownership(final WorldPosition position) {
+        return this.featureState() == FeatureState.MAINTENANCE ? Ownership.MAINTENANCE : Ownership.UNSHARDED;
+    }
+
+    @Override
+    public RemoteOperations remoteOperations() {
+        return this.remoteOperations;
     }
 
     @Override
@@ -138,7 +163,12 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         if (previousRetry != null) {
             previousRetry.cancel(false);
         }
-        this.snapshot.set(new Snapshot(identity, FeatureState.PENDING, "waiting for local node and Velocity validation"));
+        this.snapshot.set(new Snapshot(
+            identity,
+            FeatureState.PENDING,
+            "waiting for local node and Velocity validation",
+            new PeerStatus(false, "", "", "peer is not validated")
+        ));
         this.executor.execute(() -> this.validate(identity, currentGeneration, 0));
     }
 
@@ -158,7 +188,12 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
 
         if (result.accepted()) {
             if (this.generation.get() == expectedGeneration && !this.closed.get()) {
-                this.snapshot.set(new Snapshot(identity, FeatureState.ENABLED, result.detail()));
+                this.snapshot.set(new Snapshot(
+                    identity,
+                    FeatureState.ENABLED,
+                    result.detail(),
+                    new PeerStatus(true, result.peerId(), result.peerName(), result.detail())
+                ));
                 this.logger.info("Shardingbase features enabled for " + identity.serverName() + " (" + identity.serverId() + ')');
             }
             return;
@@ -170,7 +205,12 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
 
     private void publishDisabled(final ServerIdentity identity, final long expectedGeneration, final String detail) {
         if (this.generation.get() == expectedGeneration && !this.closed.get()) {
-            this.snapshot.set(new Snapshot(identity, FeatureState.DISABLED, detail));
+            this.snapshot.set(new Snapshot(
+                identity,
+                FeatureState.DISABLED,
+                detail,
+                new PeerStatus(false, "", "", detail)
+            ));
         }
     }
 
@@ -198,7 +238,12 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         }
         this.executor.shutdownNow();
         final Snapshot previous = this.snapshot.get();
-        this.snapshot.set(new Snapshot(previous.identity(), FeatureState.DISABLED, "server is shutting down"));
+        this.snapshot.set(new Snapshot(
+            previous.identity(),
+            FeatureState.DISABLED,
+            "server is shutting down",
+            new PeerStatus(false, "", "", "server is shutting down")
+        ));
     }
 
     private static ScheduledExecutorService createExecutor() {
@@ -217,11 +262,38 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         return message == null || message.isBlank() ? exception.getClass().getSimpleName() : message;
     }
 
-    private record Snapshot(ServerIdentity identity, FeatureState featureState, String detail) {
+    private record Snapshot(ServerIdentity identity, FeatureState featureState, String detail, PeerStatus peerStatus) {
         private Snapshot {
             Objects.requireNonNull(identity, "identity");
             Objects.requireNonNull(featureState, "featureState");
             Objects.requireNonNull(detail, "detail");
+            Objects.requireNonNull(peerStatus, "peerStatus");
+        }
+    }
+
+    private final class DisabledRemoteOperations implements RemoteOperations {
+        @Override
+        public CompletionStage<RemoteResult<BlockSnapshot>> readBlock(final WorldPosition position) {
+            return unavailable();
+        }
+
+        @Override
+        public CompletionStage<RemoteResult<Void>> setBlockData(final WorldPosition position, final String blockData) {
+            return unavailable();
+        }
+
+        @Override
+        public CompletionStage<RemoteResult<Boolean>> breakBlock(final WorldPosition position) {
+            return unavailable();
+        }
+
+        @Override
+        public CompletionStage<RemoteResult<UUID>> spawnEntity(final EntitySpawn spawn) {
+            return unavailable();
+        }
+
+        private <T> CompletionStage<RemoteResult<T>> unavailable() {
+            return CompletableFuture.completedFuture(new RemoteResult.Unavailable<>(ShardingbaseRuntime.this.statusDetail()));
         }
     }
 }

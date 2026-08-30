@@ -17,7 +17,7 @@ class BackendRegistryTest {
         final var first = registry.register("node-a", request("id-a", "backend-a", "26.2", "build-a"));
         final var second = registry.register("node-b", request("id-b", "backend-b", "26.2", "build-a"));
 
-        assertTrue(first.accepted());
+        assertFalse(first.accepted());
         assertEquals("", first.peerId());
         assertTrue(second.accepted());
         assertEquals("id-a", second.peerId());
@@ -29,7 +29,7 @@ class BackendRegistryTest {
     @Test
     void rejectsIdentityAndVersionConflicts(@TempDir final Path directory) throws Exception {
         final BackendRegistry registry = new BackendRegistry(directory.resolve("shardingbase.db"));
-        assertTrue(registry.register("node-a", request("id-a", "backend-a", "26.2", "build-a")).accepted());
+        assertFalse(registry.register("node-a", request("id-a", "backend-a", "26.2", "build-a")).accepted());
 
         assertFalse(registry.register("node-b", request("id-a", "backend-b", "26.2", "build-a")).accepted());
         assertFalse(registry.register("node-b", request("id-b", "backend-a", "26.2", "build-a")).accepted());

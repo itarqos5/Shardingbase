@@ -52,7 +52,7 @@ public final class LocalNodeValidator implements BackendValidator {
         final String portValue = this.environment.get(PORT_ENVIRONMENT_VARIABLE);
         final String token = this.environment.get(TOKEN_ENVIRONMENT_VARIABLE);
         if (portValue == null || token == null || token.isBlank()) {
-            return new ValidationResult(false, "local Shardingbase node is not available");
+            return new ValidationResult(false, "local Shardingbase node is not available", "", "");
         }
 
         final int port;
@@ -87,10 +87,10 @@ public final class LocalNodeValidator implements BackendValidator {
                 }
                 final int version = input.readInt();
                 if (version != ShardingbaseProtocol.VERSION) {
-                    return new ValidationResult(false, "node protocol mismatch: " + version);
+                    return new ValidationResult(false, "node protocol mismatch: " + version, "", "");
                 }
                 final boolean accepted = input.readBoolean();
-                return new ValidationResult(accepted, readField(input));
+                return new ValidationResult(accepted, readField(input), readField(input), readField(input));
             }
         }
     }

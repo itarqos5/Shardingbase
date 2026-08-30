@@ -89,7 +89,7 @@ final class BackendRegistry {
                     ? "validated; waiting for the second backend"
                     : "validated with peer " + peer.serverName();
                 return new ValidationResponse(
-                    true,
+                    peer != null,
                     detail,
                     peer == null ? "" : peer.serverId(),
                     peer == null ? "" : peer.serverName()

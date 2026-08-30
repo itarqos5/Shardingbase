@@ -31,6 +31,28 @@ public interface ShardingbaseService {
     String statusDetail();
 
     /**
+     * Gets detached peer status.
+     *
+     * @return current peer status
+     */
+    PeerStatus peerStatus();
+
+    /**
+     * Resolves ownership without loading or generating a chunk.
+     *
+     * @param position detached position
+     * @return current ownership result
+     */
+    Ownership ownership(WorldPosition position);
+
+    /**
+     * Gets the explicit asynchronous remote-operation surface.
+     *
+     * @return remote operations
+     */
+    RemoteOperations remoteOperations();
+
+    /**
      * Reloads only Shardingbase configuration and repeats validation.
      *
      * @return eventual reload result
