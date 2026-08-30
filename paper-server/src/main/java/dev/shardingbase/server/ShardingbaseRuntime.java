@@ -24,6 +24,7 @@ import dev.shardingbase.server.remote.RemoteOperationCoordinator;
 import dev.shardingbase.server.validation.BackendValidator;
 import dev.shardingbase.server.validation.LocalNodeValidator;
 import dev.shardingbase.server.validation.ValidationResult;
+import dev.shardingbase.server.world.WorldTransactionCoordinator;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
@@ -61,6 +62,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     private final RemoteOperationCoordinator remoteOperationCoordinator;
     private final RemoteCommandCoordinator remoteCommandCoordinator;
     private final WorldMapCoordinator worldMapCoordinator;
+    private final WorldTransactionCoordinator worldTransactionCoordinator;
     private volatile @Nullable ScheduledFuture<?> retryTask;
     private volatile Runnable menuReloader = () -> {
     };
@@ -114,6 +116,8 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         this.remoteOperationCoordinator = new RemoteOperationCoordinator(configuration.identity().serverId(), logger);
         this.remoteCommandCoordinator = new RemoteCommandCoordinator(configuration.identity().serverId(), logger);
         this.worldMapCoordinator = new WorldMapCoordinator(configuration.identity().serverId(), logger);
+        this.worldTransactionCoordinator =
+            new WorldTransactionCoordinator(configuration.identity().serverId(), logger);
         this.remoteOperations = new RoutedRemoteOperations();
         this.shardManifests = new AtomicReference<>(ShardManifestRegistry.load(serverDirectory));
         this.snapshot = new AtomicReference<>(new Snapshot(
@@ -196,6 +200,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         this.remoteOperationCoordinator.start(playerExecutor, this::ownership);
         this.remoteCommandCoordinator.start(playerExecutor);
         this.worldMapCoordinator.start(playerExecutor);
+        this.worldTransactionCoordinator.start(playerExecutor);
     }
 
     /** Renders every generated chunk in a loaded world and publishes a one-use planner link. */
@@ -333,6 +338,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         this.remoteOperationCoordinator.close();
         this.remoteCommandCoordinator.close();
         this.worldMapCoordinator.close();
+        this.worldTransactionCoordinator.close();
         final Snapshot previous = this.snapshot.get();
         this.snapshot.set(new Snapshot(
             previous.identity(),

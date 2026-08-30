@@ -40,6 +40,7 @@ final class LocalBackendController implements AutoCloseable {
     private final ConcurrentHashMap<ProtocolChannel, ArrayBlockingQueue<ProtocolFrame>> backendPushes =
         new ConcurrentHashMap<>();
     private final Thread acceptThread;
+    private volatile LocalRequestHandler localRequestHandler;
 
     LocalBackendController(final ProxyValidationClient proxyClient) throws IOException {
         this.proxyClient = proxyClient;
@@ -63,7 +64,9 @@ final class LocalBackendController implements AutoCloseable {
             ProtocolChannel.WORLD_TRANSACTION
         }) {
             this.backendPushes.put(channel, new ArrayBlockingQueue<>(64));
-            this.proxyClient.pushHandler(channel, this::enqueueBackendPush);
+            if (channel != ProtocolChannel.WORLD_TRANSACTION) {
+                this.proxyClient.pushHandler(channel, this::enqueueProxyPush);
+            }
         }
     }
 
@@ -76,6 +79,17 @@ final class LocalBackendController implements AutoCloseable {
             "SHARDINGBASE_NODE_PORT", Integer.toString(this.serverSocket.getLocalPort()),
             "SHARDINGBASE_NODE_TOKEN", this.token
         );
+    }
+
+    void localRequestHandler(final LocalRequestHandler handler) {
+        this.localRequestHandler = handler;
+    }
+
+    void enqueueBackendPush(final ProtocolFrame frame) throws IOException {
+        final ArrayBlockingQueue<ProtocolFrame> queue = this.backendPushes.get(frame.channel());
+        if (queue == null || !queue.offer(frame)) {
+            throw new IOException("backend control queue is full for " + frame.channel());
+        }
     }
 
     private void acceptLoop() {
@@ -133,30 +147,37 @@ final class LocalBackendController implements AutoCloseable {
     }
 
     private ProtocolFrame forward(final ProtocolFrame request) throws IOException {
-        if ("node-local".equals(request.targetId()) && request.messageType() == MessageType.BACKEND_POLL) {
-            final ArrayBlockingQueue<ProtocolFrame> queue = this.backendPushes.get(request.channel());
-            if (queue == null) {
-                throw new IOException("Unsupported backend polling channel " + request.channel());
+        if ("node-local".equals(request.targetId())) {
+            if (request.messageType() == MessageType.BACKEND_POLL) {
+                final ArrayBlockingQueue<ProtocolFrame> queue = this.backendPushes.get(request.channel());
+                if (queue == null) {
+                    throw new IOException("Unsupported backend polling channel " + request.channel());
+                }
+                final ProtocolFrame pushed;
+                try {
+                    pushed = queue.poll(5, TimeUnit.SECONDS);
+                } catch (final InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while polling backend control messages", exception);
+                }
+                if (pushed != null) {
+                    return pushed;
+                }
+                return new ProtocolFrame(
+                    ShardingbaseProtocol.VERSION,
+                    request.channel(),
+                    MessageType.BACKEND_POLL_EMPTY,
+                    request.correlationId(),
+                    "node",
+                    request.sourceId(),
+                    new byte[0]
+                );
             }
-            final ProtocolFrame pushed;
-            try {
-                pushed = queue.poll(5, TimeUnit.SECONDS);
-            } catch (final InterruptedException exception) {
-                Thread.currentThread().interrupt();
-                throw new IOException("Interrupted while polling backend control messages", exception);
+            final LocalRequestHandler handler = this.localRequestHandler;
+            if (handler == null) {
+                throw new IOException("No local node handler is registered for " + request.channel());
             }
-            if (pushed != null) {
-                return pushed;
-            }
-            return new ProtocolFrame(
-                ShardingbaseProtocol.VERSION,
-                request.channel(),
-                MessageType.BACKEND_POLL_EMPTY,
-                request.correlationId(),
-                "node",
-                request.sourceId(),
-                new byte[0]
-            );
+            return handler.handle(request);
         }
         if (!"velocity".equals(request.targetId())) {
             this.proxyClient.send(
@@ -201,10 +222,11 @@ final class LocalBackendController implements AutoCloseable {
         );
     }
 
-    private void enqueueBackendPush(final ProtocolFrame frame) {
-        final ArrayBlockingQueue<ProtocolFrame> queue = this.backendPushes.get(frame.channel());
-        if (queue != null && queue.offer(frame)) {
+    private void enqueueProxyPush(final ProtocolFrame frame) {
+        try {
+            this.enqueueBackendPush(frame);
             return;
+        } catch (IOException _) {
         }
         try {
             this.proxyClient.respond(
@@ -243,5 +265,10 @@ final class LocalBackendController implements AutoCloseable {
         this.serverSocket.close();
         this.clients.shutdownNow();
         this.acceptThread.interrupt();
+    }
+
+    @FunctionalInterface
+    interface LocalRequestHandler {
+        ProtocolFrame handle(ProtocolFrame request) throws IOException;
     }
 }

@@ -37,7 +37,9 @@ public final class ShardingbaseNode {
                 ProxyValidationClient proxyClient = new ProxyValidationClient();
                 NodeFileTransferHandler fileTransfers = new NodeFileTransferHandler(proxyClient, stagingRoot());
                 LocalBackendController controller = LocalBackendController.start(proxyClient);
-                BackendProcess backend = BackendProcess.launch(extraction.path(), args, controller.childEnvironment())
+                BackendProcess backend = BackendProcess.launch(extraction.path(), args, controller.childEnvironment());
+                NodeWorldTransactionController transactions =
+                    NodeWorldTransactionController.start(proxyClient, controller, backend)
             ) {
                 System.out.println("Starting the Shardingbase backend as a supervised process.");
                 final int exitCode = backend.waitForExit();
