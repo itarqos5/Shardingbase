@@ -669,7 +669,9 @@ public final class CraftServer implements Server {
 
     @Override
     public String getName() {
-        return this.serverName;
+        // Shardingbase - Preserve Paper's legacy Bukkit identity for plugins that incorrectly
+        // gate Paper support on Bukkit.getName() instead of ServerBuildInfo#isBrandCompatible.
+        return "Paper";
     }
 
     @Override
