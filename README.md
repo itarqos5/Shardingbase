@@ -55,7 +55,14 @@ This produces `Shardingbase-server.jar`, `Shardingbase-Velocity.jar`, and
 `Shardingbase-Node.jar` in `build/release/`. It also installs the manager as
 `Shardingbase.jar` in the project root. The manager contains the server JAR as
 an embedded resource. Starting it exports that resource beside the manager as
-`Shardingbase-backend.jar`; it does not launch the backend.
+`Shardingbase-backend.jar`, launches it in a supervised child JVM, inherits the
+current JVM options and console, forwards all Minecraft server arguments, and
+returns the backend's exit code.
+
+For Pterodactyl, upload only `Shardingbase-Node.jar` as the configured server
+JAR (for example, rename it to `server.jar`). The backend is embedded and does
+not need to be uploaded separately. `Shardingbase-Velocity.jar` is installed
+separately on the Velocity proxy.
 
 Run the focused checks with:
 
