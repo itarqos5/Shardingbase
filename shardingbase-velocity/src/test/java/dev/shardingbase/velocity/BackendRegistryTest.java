@@ -24,6 +24,10 @@ class BackendRegistryTest {
         assertEquals("backend-a", second.peerName());
         assertTrue(registry.register("node-a", request("id-a", "backend-a", "26.2", "build-a")).accepted());
         assertFalse(registry.register("node-c", request("id-c", "backend-c", "26.2", "build-a")).accepted());
+        assertEquals("node-a", registry.nodeIdForTarget("id-a").orElseThrow());
+        assertEquals("node-a", registry.nodeIdForTarget("backend-a").orElseThrow());
+        assertEquals("node-b", registry.nodeIdForTarget("node-b").orElseThrow());
+        assertTrue(registry.nodeIdForTarget("missing").isEmpty());
     }
 
     @Test

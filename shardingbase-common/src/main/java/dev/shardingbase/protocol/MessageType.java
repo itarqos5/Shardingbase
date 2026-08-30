@@ -2,6 +2,8 @@ package dev.shardingbase.protocol;
 
 /** Message families understood by the prototype transport. */
 public enum MessageType {
+    AUTHENTICATE_NODE_REQUEST,
+    AUTHENTICATE_NODE_RESPONSE,
     VALIDATE_BACKEND_REQUEST,
     VALIDATE_BACKEND_RESPONSE,
     HEARTBEAT,

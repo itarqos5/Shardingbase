@@ -10,6 +10,7 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Optional;
 
 /** Transactional SQLite authority for the exactly-two-backend prototype. */
 final class BackendRegistry {
@@ -100,6 +101,21 @@ final class BackendRegistry {
             }
         } catch (final SQLException exception) {
             throw new IOException("SQLite backend registration failed", exception);
+        }
+    }
+
+    synchronized Optional<String> nodeIdForTarget(final String targetId) throws IOException {
+        try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement(
+            "SELECT node_id FROM backends WHERE server_id = ? OR server_name = ? OR node_id = ? LIMIT 1"
+        )) {
+            statement.setString(1, targetId);
+            statement.setString(2, targetId);
+            statement.setString(3, targetId);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? Optional.of(result.getString("node_id")) : Optional.empty();
+            }
+        } catch (final SQLException exception) {
+            throw new IOException("SQLite backend target lookup failed", exception);
         }
     }
 

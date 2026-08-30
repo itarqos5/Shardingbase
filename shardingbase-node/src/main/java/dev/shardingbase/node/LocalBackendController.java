@@ -47,8 +47,8 @@ final class LocalBackendController implements AutoCloseable {
             .start(this::acceptLoop);
     }
 
-    static LocalBackendController start() throws IOException {
-        return new LocalBackendController(new ProxyValidationClient());
+    static LocalBackendController start(final ProxyValidationClient proxyClient) throws IOException {
+        return new LocalBackendController(proxyClient);
     }
 
     Map<String, String> childEnvironment() {
