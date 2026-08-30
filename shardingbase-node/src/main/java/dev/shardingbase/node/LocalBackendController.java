@@ -1,11 +1,15 @@
 package dev.shardingbase.node;
 
+import dev.shardingbase.protocol.FrameCodec;
+import dev.shardingbase.protocol.MessageType;
+import dev.shardingbase.protocol.ProtocolFrame;
 import dev.shardingbase.protocol.ShardingbaseProtocol;
+import dev.shardingbase.protocol.ValidationPayloadCodec;
+import dev.shardingbase.protocol.ValidationPayloadCodec.ValidationRequest;
 import dev.shardingbase.protocol.ValidationPayloadCodec.ValidationResponse;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -76,39 +80,67 @@ final class LocalBackendController implements AutoCloseable {
             socket.setSoTimeout(CLIENT_TIMEOUT_MILLIS);
             try (
                 DataInputStream input = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
-                DataOutputStream output = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()))
+                BufferedOutputStream output = new BufferedOutputStream(socket.getOutputStream())
             ) {
                 if (input.readInt() != ShardingbaseProtocol.MAGIC) {
                     return;
                 }
                 final int version = input.readInt();
                 final String presentedToken = readField(input);
-                final String serverId = readField(input);
-                final String serverName = readField(input);
-                final String minecraftVersion = readField(input);
-                final String shardingbaseVersion = readField(input);
-
-                final ValidationResponse response;
                 if (!constantTimeEquals(this.token, presentedToken)) {
-                    response = new ValidationResponse(false, "local node authentication failed", "", "");
-                } else if (version != ShardingbaseProtocol.VERSION) {
-                    response = new ValidationResponse(false, "backend/node protocol mismatch", "", "");
-                } else {
-                    response = this.proxyClient.validate(serverId, serverName, minecraftVersion, shardingbaseVersion);
+                    throw new IOException("local node authentication failed");
                 }
-                output.writeInt(ShardingbaseProtocol.MAGIC);
-                output.writeInt(ShardingbaseProtocol.VERSION);
-                output.writeBoolean(response.accepted());
-                writeField(output, response.detail());
-                writeField(output, response.peerId());
-                writeField(output, response.peerName());
-                output.flush();
+                if (version != ShardingbaseProtocol.VERSION) {
+                    throw new IOException("backend/node protocol mismatch");
+                }
+                final ProtocolFrame request = FrameCodec.read(input);
+                if (request.version() != ShardingbaseProtocol.VERSION) {
+                    throw new IOException("backend frame protocol mismatch");
+                }
+                final ProtocolFrame proxyResponse = this.forward(request);
+                final ProtocolFrame response = new ProtocolFrame(
+                    ShardingbaseProtocol.VERSION,
+                    proxyResponse.channel(),
+                    proxyResponse.messageType(),
+                    request.correlationId(),
+                    "node",
+                    request.sourceId(),
+                    proxyResponse.payload()
+                );
+                FrameCodec.write(output, response);
             }
         } catch (final IOException exception) {
             if (!this.closed.get()) {
-                System.err.println("Shardingbase local validation failed: " + exception.getMessage());
+                System.err.println("Shardingbase local control request failed: " + exception.getMessage());
             }
         }
+    }
+
+    private ProtocolFrame forward(final ProtocolFrame request) throws IOException {
+        if (request.messageType() == MessageType.VALIDATE_BACKEND_REQUEST) {
+            final ValidationRequest validation = ValidationPayloadCodec.decodeRequest(request.payload());
+            final ValidationResponse response = this.proxyClient.validate(
+                validation.serverId(),
+                validation.serverName(),
+                validation.minecraftVersion(),
+                validation.shardingbaseVersion()
+            );
+            return new ProtocolFrame(
+                ShardingbaseProtocol.VERSION,
+                request.channel(),
+                MessageType.VALIDATE_BACKEND_RESPONSE,
+                request.correlationId(),
+                "velocity",
+                request.sourceId(),
+                ValidationPayloadCodec.encodeResponse(response)
+            );
+        }
+        return this.proxyClient.request(
+            request.channel(),
+            request.messageType(),
+            request.targetId(),
+            request.payload()
+        );
     }
 
     private static boolean constantTimeEquals(final String expected, final String actual) {
@@ -128,15 +160,6 @@ final class LocalBackendController implements AutoCloseable {
             throw new EOFException("Local control request ended inside a field");
         }
         return new String(bytes, StandardCharsets.UTF_8);
-    }
-
-    private static void writeField(final DataOutputStream output, final String value) throws IOException {
-        final byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-        if (bytes.length > ShardingbaseProtocol.MAX_CONTROL_FIELD_BYTES) {
-            throw new IOException("Local control response exceeds the field limit");
-        }
-        output.writeInt(bytes.length);
-        output.write(bytes);
     }
 
     @Override
