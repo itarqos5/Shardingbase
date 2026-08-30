@@ -1,0 +1,5 @@
+name: ShardingbaseFixtureBukkit
+version: 1.0.0
+main: dev.shardingbase.fixture.bukkit.BukkitFixturePlugin
+description: Minimal Bukkit descriptor compatibility fixture
+author: Shardingbase

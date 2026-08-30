@@ -193,11 +193,17 @@ Implemented and tested in this branch:
 - a self-extracting child-JVM node with distinct node/backend memory limits;
 - raw Anvil region splitting by X or Z chunk boundary for terrain, entities, and
   POI data, including negative region coordinates;
-- asynchronous public API result types and peer/identity reporting.
+- dual transaction authorization, atomic phase journals, mandatory complete
+  backups with hash manifests, and non-destructive split preparation;
+- monotonic SQLite player revisions plus bounded portable snapshot codecs for
+  every configurable data category;
+- asynchronous public API result types and peer/identity reporting;
+- representative Bukkit, legacy Spigot, and Paper fixture plugins, all verified
+  to load and enable together on the generated Shardingbase backend.
 
 Not yet safe or wired end-to-end:
 
-- portable player snapshot capture/staging and live Velocity handoff;
+- live player capture/apply hooks and paused Velocity handoff;
 - remote command catalog/execution and remote operation routing;
 - generated-chunk map tiles, HTTPS planner, and WebSocket sessions;
 - signed plans, mandatory full backup, relay, journal recovery, rollback, and

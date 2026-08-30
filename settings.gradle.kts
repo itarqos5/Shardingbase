@@ -40,6 +40,13 @@ include("shardingbase-common")
 include("shardingbase-velocity")
 include("shardingbase-node")
 
+include("shardingbase-fixture-bukkit")
+project(":shardingbase-fixture-bukkit").projectDir = file("compatibility-fixtures/bukkit")
+include("shardingbase-fixture-spigot")
+project(":shardingbase-fixture-spigot").projectDir = file("compatibility-fixtures/spigot")
+include("shardingbase-fixture-paper")
+project(":shardingbase-fixture-paper").projectDir = file("compatibility-fixtures/paper")
+
 include("paper-checkstyle")
 
 optionalInclude("test-plugin")

@@ -1,0 +1,6 @@
+name: ShardingbaseFixturePaper
+version: 1.0.0
+main: dev.shardingbase.fixture.paper.PaperFixturePlugin
+description: Paper descriptor and Shardingbase API compatibility fixture
+author: Shardingbase
+api-version: '26.2'

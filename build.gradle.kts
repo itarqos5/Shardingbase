@@ -126,3 +126,16 @@ val assembleShardingbaseRelease by tasks.registering(Sync::class) {
     from(layout.projectDirectory.file("shardingbase-velocity/build/libs/Shardingbase-Velocity.jar"))
     from(layout.projectDirectory.file("shardingbase-node/build/libs/Shardingbase-Node.jar"))
 }
+
+tasks.register("buildShardingbaseCompatibilityFixtures") {
+    group = "verification"
+    description = "Build representative Bukkit, legacy Spigot, and Paper compatibility plugins"
+    dependsOn(
+        ":shardingbase-fixture-bukkit:check",
+        ":shardingbase-fixture-bukkit:jar",
+        ":shardingbase-fixture-spigot:check",
+        ":shardingbase-fixture-spigot:jar",
+        ":shardingbase-fixture-paper:check",
+        ":shardingbase-fixture-paper:jar",
+    )
+}

@@ -1,0 +1,6 @@
+name: ShardingbaseFixtureSpigot
+version: 1.0.0
+main: dev.shardingbase.fixture.spigot.SpigotFixturePlugin
+description: Legacy Spigot plugin compatibility fixture
+author: Shardingbase
+api-version: '1.13'
