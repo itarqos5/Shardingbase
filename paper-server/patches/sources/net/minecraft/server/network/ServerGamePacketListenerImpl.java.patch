@@ -1951,7 +1951,7 @@
              LOGGER.warn("Player {} tried to request game rule values without required permissions", this.player.getGameProfile().name());
          } else {
              GameRules gameRules = this.player.level().getGameRules();
-@@ -1938,16 +_,27 @@
+@@ -1938,16 +_,31 @@
  
      @Override
      public void handleContainerClose(final ServerboundContainerClosePacket packet) {
@@ -1972,6 +1972,10 @@
      public void handleContainerClick(final ServerboundContainerClickPacket packet) {
          PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
 +        if (this.player.isImmobile()) return; // CraftBukkit
++        if (this.server.server.shardingbaseRuntime().isPlayerStateFrozen(this.player.getUUID())) { // Shardingbase
++            this.player.containerMenu.sendAllDataToRemote();
++            return;
++        }
          this.player.resetLastActionTime();
 -        if (this.player.containerMenu.containerId == packet.containerId()) {
 -            if (this.player.isSpectator() || this.player.isDeadOrDying()) {

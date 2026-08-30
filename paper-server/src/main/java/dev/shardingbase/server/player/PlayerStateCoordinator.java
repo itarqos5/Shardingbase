@@ -3,10 +3,15 @@ package dev.shardingbase.server.player;
 import dev.shardingbase.protocol.PlayerDataCategory;
 import dev.shardingbase.protocol.PlayerHandoffCodec;
 import dev.shardingbase.protocol.PlayerSnapshot;
+import dev.shardingbase.protocol.MessageType;
+import dev.shardingbase.protocol.ProtocolChannel;
+import dev.shardingbase.protocol.ProtocolFrame;
+import dev.shardingbase.server.validation.LocalNodeClient;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.EnumSet;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -15,9 +20,14 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.bukkit.entity.Player;
+import org.bukkit.Bukkit;
+import net.kyori.adventure.text.Component;
 
 /** Coordinates non-blocking transport and server-thread capture/application of portable player state. */
 public final class PlayerStateCoordinator implements AutoCloseable {
@@ -30,6 +40,12 @@ public final class PlayerStateCoordinator implements AutoCloseable {
     private final AppliedPlayerRevisionStore revisions;
     private final Logger logger;
     private final ThreadPoolExecutor transport;
+    private final LocalNodeClient node = new LocalNodeClient();
+    private final ConcurrentHashMap<UUID, PlayerHandoffCodec.Capture> managedCaptures = new ConcurrentHashMap<>();
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicBoolean polling = new AtomicBoolean();
+    private volatile Executor serverExecutor;
+    private volatile Thread pollThread;
 
     public PlayerStateCoordinator(final String backendId, final Path serverDirectory, final Logger logger) {
         this.backendId = backendId;
@@ -46,6 +62,17 @@ public final class PlayerStateCoordinator implements AutoCloseable {
             task -> Thread.ofPlatform().daemon(true).name("Shardingbase Player Transport").unstarted(task),
             new ThreadPoolExecutor.AbortPolicy()
         );
+    }
+
+    /** Attaches the server-thread executor and starts receiving proxy capture instructions. */
+    public void serverExecutor(final Executor serverExecutor) {
+        this.serverExecutor = java.util.Objects.requireNonNull(serverExecutor, "serverExecutor");
+        if (this.polling.compareAndSet(false, true)) {
+            this.pollThread = Thread.ofPlatform()
+                .daemon(true)
+                .name("Shardingbase Backend Control Poll")
+                .start(this::pollLoop);
+        }
     }
 
     /** Begins target staging retrieval without blocking the server thread. */
@@ -84,12 +111,15 @@ public final class PlayerStateCoordinator implements AutoCloseable {
      * Captures final post-quit state on the server thread and asynchronously replicates it to the peer.
      */
     public void captureAndReplicate(final Player player, final String peerBackendId) {
-        if (peerBackendId == null || peerBackendId.isBlank()) {
+        final PlayerHandoffCodec.Capture managed = this.managedCaptures.remove(player.getUniqueId());
+        final String targetBackendId = managed == null ? peerBackendId : managed.targetBackendId();
+        final Set<PlayerDataCategory> categories = managed == null ? ALL_CATEGORIES : managed.categories();
+        if (targetBackendId == null || targetBackendId.isBlank()) {
             return;
         }
         final PlayerSnapshot captured;
         try {
-            captured = this.adapter.capture(player, 1, this.backendId, ALL_CATEGORIES);
+            captured = this.adapter.capture(player, managed == null ? 1 : managed.revision(), this.backendId, categories);
         } catch (final IOException | RuntimeException exception) {
             this.logger.log(Level.WARNING, "Unable to capture portable player state for " + player.getUniqueId(), exception);
             return;
@@ -97,8 +127,10 @@ public final class PlayerStateCoordinator implements AutoCloseable {
         try {
             this.transport.execute(() -> {
                 try {
-                    final long revision = this.handoff.prepare(captured.playerId(), peerBackendId, ALL_CATEGORIES);
-                    this.handoff.stage(peerBackendId, new PlayerSnapshot(
+                    final long revision = managed == null
+                        ? this.handoff.prepare(captured.playerId(), targetBackendId, categories)
+                        : managed.revision();
+                    this.handoff.stage(targetBackendId, new PlayerSnapshot(
                         captured.playerId(),
                         revision,
                         this.backendId,
@@ -117,8 +149,69 @@ public final class PlayerStateCoordinator implements AutoCloseable {
         }
     }
 
+    /** Returns whether a managed handoff is currently freezing this player's source state. */
+    public boolean frozen(final UUID playerId) {
+        return this.managedCaptures.containsKey(playerId);
+    }
+
+    private void pollLoop() {
+        while (!this.closed.get()) {
+            try {
+                final ProtocolFrame response = this.node.request(
+                    this.backendId,
+                    ProtocolChannel.PLAYER_SYNC,
+                    MessageType.BACKEND_POLL,
+                    "node-local",
+                    new byte[0]
+                );
+                if (response.messageType() == MessageType.PLAYER_SNAPSHOT_CAPTURE) {
+                    this.dispatchCapture(PlayerHandoffCodec.decodeCapture(response.payload()));
+                } else if (response.messageType() != MessageType.BACKEND_POLL_EMPTY) {
+                    this.logger.warning("Ignored unexpected backend control message " + response.messageType());
+                }
+            } catch (final IOException exception) {
+                if (!this.closed.get()) {
+                    try {
+                        TimeUnit.SECONDS.sleep(1);
+                    } catch (final InterruptedException _) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    private void dispatchCapture(final PlayerHandoffCodec.Capture capture) {
+        final Executor executor = this.serverExecutor;
+        if (executor == null) {
+            return;
+        }
+        executor.execute(() -> {
+            final Player player = Bukkit.getPlayer(capture.playerId());
+            if (player == null || !player.isOnline()) {
+                this.logger.warning("Managed handoff player is no longer online: " + capture.playerId());
+                return;
+            }
+            final PlayerHandoffCodec.Capture existing = this.managedCaptures.putIfAbsent(capture.playerId(), capture);
+            if (existing != null && existing.revision() >= capture.revision()) {
+                return;
+            }
+            if (existing != null) {
+                this.managedCaptures.put(capture.playerId(), capture);
+            }
+            player.closeInventory();
+            player.kick(Component.text("Shardingbase is transferring you to the peer shard…"));
+        });
+    }
+
     @Override
     public void close() {
+        this.closed.set(true);
+        final Thread currentPollThread = this.pollThread;
+        if (currentPollThread != null) {
+            currentPollThread.interrupt();
+        }
         this.transport.shutdownNow();
     }
 }

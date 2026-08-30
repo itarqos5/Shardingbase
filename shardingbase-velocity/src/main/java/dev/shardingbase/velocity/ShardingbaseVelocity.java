@@ -5,6 +5,9 @@ import com.velocitypowered.api.event.EventTask;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
+import com.velocitypowered.api.event.player.ServerPreConnectEvent;
+import com.velocitypowered.api.event.player.KickedFromServerEvent;
+import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.ProxyServer;
@@ -24,6 +27,7 @@ public final class ShardingbaseVelocity {
     private final Logger logger;
     private final Path dataDirectory;
     private volatile ControlServer controlServer;
+    private volatile PlayerTransferCoordinator playerTransfers;
 
     @Inject
     public ShardingbaseVelocity(
@@ -53,6 +57,26 @@ public final class ShardingbaseVelocity {
         }
     }
 
+    @Subscribe
+    public EventTask onServerPreConnect(final ServerPreConnectEvent event) {
+        final PlayerTransferCoordinator current = this.playerTransfers;
+        return current == null ? null : current.beforeConnect(event);
+    }
+
+    @Subscribe
+    public EventTask onKickedFromServer(final KickedFromServerEvent event) {
+        final PlayerTransferCoordinator current = this.playerTransfers;
+        return current == null ? null : current.afterSourceKick(event);
+    }
+
+    @Subscribe
+    public void onDisconnect(final DisconnectEvent event) {
+        final PlayerTransferCoordinator current = this.playerTransfers;
+        if (current != null) {
+            current.disconnected(event.getPlayer().getUniqueId());
+        }
+    }
+
     private void initialize() {
         try {
             final VelocityConfiguration configuration = VelocityConfiguration.load(this.dataDirectory);
@@ -61,6 +85,12 @@ public final class ShardingbaseVelocity {
             final PlayerStateStore playerStateStore = new PlayerStateStore(configuration.databasePath());
             this.controlServer = new ControlServer(
                 this.proxy, this.logger, configuration, tlsMaterial, registry, playerStateStore
+            );
+            this.playerTransfers = new PlayerTransferCoordinator(
+                registry,
+                playerStateStore,
+                this.controlServer,
+                this.logger
             );
             this.logger.info(
                 "Shardingbase controller listening on {}:{} for {} registered Velocity backend(s); protocol {}; TLS SHA-256 {}",

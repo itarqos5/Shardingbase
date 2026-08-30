@@ -423,6 +423,7 @@ public final class CraftServer implements Server {
             throw new IllegalStateException("Fatal Shardingbase configuration error: " + exception.getMessage(), exception);
         }
         dev.shardingbase.api.Shardingbase.installService(this.shardingbaseRuntime);
+        this.shardingbaseRuntime.playerExecutor(console::execute);
         this.shardingbaseMenus = new dev.shardingbase.server.menu.ShardingbaseMenuManager(
             this, this.shardingbaseRuntime, console::execute, console.getServerDirectory(), this.logger
         );

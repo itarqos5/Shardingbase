@@ -176,6 +176,11 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         this.menuReloader = Objects.requireNonNull(menuReloader, "menuReloader");
     }
 
+    /** Attaches the server-thread executor used for managed player handoff requests. */
+    public void playerExecutor(final java.util.concurrent.Executor playerExecutor) {
+        this.playerStateCoordinator.serverExecutor(playerExecutor);
+    }
+
     /** Starts an asynchronous lookup for state staged for a joining player. */
     public CompletionStage<Optional<PlayerHandoffCodec.Stage>> fetchPlayerState(final UUID playerId) {
         return this.playerStateCoordinator.fetch(playerId);
@@ -192,9 +197,15 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     /** Captures post-quit state and schedules replication to the currently validated peer. */
     public void replicatePlayerState(final org.bukkit.entity.Player player) {
         final PeerStatus peer = this.peerStatus();
-        if (this.featureState() == FeatureState.ENABLED && peer.available()) {
+        if (this.playerStateCoordinator.frozen(player.getUniqueId())
+            || this.featureState() == FeatureState.ENABLED && peer.available()) {
             this.playerStateCoordinator.captureAndReplicate(player, peer.serverId());
         }
+    }
+
+    /** Returns whether source-side interaction is frozen for a managed handoff. */
+    public boolean isPlayerStateFrozen(final UUID playerId) {
+        return this.playerStateCoordinator.frozen(playerId);
     }
 
     private void beginValidation(final ServerIdentity identity) {

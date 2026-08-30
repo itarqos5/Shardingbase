@@ -7,6 +7,11 @@ import org.junit.jupiter.api.io.TempDir;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import dev.shardingbase.protocol.PlayerDataCategory;
+import dev.shardingbase.protocol.PlayerHandoffCodec;
+import dev.shardingbase.protocol.PlayerSnapshot;
+import java.util.Map;
 
 class PlayerStateStoreTest {
     @Test
@@ -49,5 +54,36 @@ class PlayerStateStoreTest {
         assertEquals(PlayerStateStore.StageResult.STORED,
             store.acceptRevision(playerId, 2, "backend-a", new byte[] {2}));
         assertEquals(3, new PlayerStateStore(directory.resolve("shardingbase.db")).reserveRevision(playerId));
+    }
+
+    @Test
+    void awaitsTheExactTargetRevision(@TempDir final Path directory) throws Exception {
+        final PlayerStateStore store = new PlayerStateStore(directory.resolve("shardingbase.db"));
+        final UUID playerId = UUID.randomUUID();
+        final Thread writer = Thread.ofPlatform().start(() -> {
+            try {
+                Thread.sleep(50);
+                final PlayerHandoffCodec.Stage stage = new PlayerHandoffCodec.Stage(
+                    "backend-b",
+                    new PlayerSnapshot(
+                        playerId,
+                        8,
+                        "backend-a",
+                        Map.of(PlayerDataCategory.INVENTORY, new byte[] {1})
+                    )
+                );
+                store.acceptRevision(
+                    playerId,
+                    8,
+                    "backend-a",
+                    PlayerHandoffCodec.encodeStage(stage)
+                );
+            } catch (Exception exception) {
+                throw new RuntimeException(exception);
+            }
+        });
+
+        assertTrue(store.awaitStage(playerId, 8, "backend-b", 2_000));
+        writer.join();
     }
 }

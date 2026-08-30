@@ -77,6 +77,20 @@ class PersistentControlServerTest {
                 assertEquals(heartbeatId, heartbeat.correlationId());
             }
 
+            final UUID pushedPlayerId = UUID.randomUUID();
+            server.sendPlayerCapture(
+                registry.backendForName("backend-a").orElseThrow(),
+                new PlayerHandoffCodec.Capture(
+                    pushedPlayerId,
+                    "backend-id-b",
+                    3,
+                    EnumSet.of(PlayerDataCategory.INVENTORY)
+                )
+            );
+            final ProtocolFrame pushed = FrameCodec.read(socket.getInputStream());
+            assertEquals(MessageType.PLAYER_SNAPSHOT_CAPTURE, pushed.messageType());
+            assertEquals(3, PlayerHandoffCodec.decodeCapture(pushed.payload()).revision());
+
             final UUID validationId = UUID.randomUUID();
             FrameCodec.write(socket.getOutputStream(), frame(
                 MessageType.VALIDATE_BACKEND_REQUEST,

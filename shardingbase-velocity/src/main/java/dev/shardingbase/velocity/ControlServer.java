@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -202,6 +203,23 @@ final class ControlServer implements AutoCloseable {
             ));
             default -> source.send(error(frame, "unexpected message for Velocity authority"));
         }
+    }
+
+    void sendPlayerCapture(final BackendRegistry.BackendTarget source, final PlayerHandoffCodec.Capture capture)
+        throws IOException {
+        final ClientSession session = this.sessions.get(source.nodeId());
+        if (session == null) {
+            throw new IOException("source node is unavailable");
+        }
+        session.send(new ProtocolFrame(
+            ShardingbaseProtocol.VERSION,
+            ProtocolChannel.PLAYER_SYNC,
+            MessageType.PLAYER_SNAPSHOT_CAPTURE,
+            UUID.randomUUID(),
+            "velocity",
+            source.nodeId(),
+            PlayerHandoffCodec.encodeCapture(capture)
+        ));
     }
 
     private byte[] preparePlayerHandoff(final ProtocolFrame frame) throws IOException {

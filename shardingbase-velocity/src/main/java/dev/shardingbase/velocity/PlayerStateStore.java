@@ -12,6 +12,7 @@ import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.Optional;
 import java.util.UUID;
+import dev.shardingbase.protocol.PlayerHandoffCodec;
 
 /** SQLite authority for monotonic, idempotent portable player snapshots. */
 final class PlayerStateStore {
@@ -149,6 +150,31 @@ final class PlayerStateStore {
         } catch (final SQLException exception) {
             throw failure("Unable to load a player snapshot", exception);
         }
+    }
+
+    boolean awaitStage(
+        final UUID playerId,
+        final long revision,
+        final String targetBackendId,
+        final long timeoutMillis
+    ) throws IOException {
+        final long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        while (System.nanoTime() < deadline) {
+            final Optional<StoredSnapshot> stored = this.load(playerId);
+            if (stored.isPresent() && stored.orElseThrow().revision() == revision) {
+                final PlayerHandoffCodec.Stage stage = PlayerHandoffCodec.decodeStage(stored.orElseThrow().snapshot());
+                if (targetBackendId.equals(stage.targetBackendId())) {
+                    return true;
+                }
+            }
+            try {
+                java.util.concurrent.TimeUnit.MILLISECONDS.sleep(25);
+            } catch (final InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while awaiting staged player state", exception);
+            }
+        }
+        return false;
     }
 
     private Connection connection() throws SQLException {
