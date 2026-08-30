@@ -56,8 +56,7 @@ final class ProxyValidationClient implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean();
     private final ExecutorService connectionExecutor;
     private final ScheduledExecutorService heartbeatExecutor;
-    private volatile Consumer<ProtocolFrame> pushHandler = frame -> {
-    };
+    private final ConcurrentHashMap<ProtocolChannel, Consumer<ProtocolFrame>> pushHandlers = new ConcurrentHashMap<>();
 
     ProxyValidationClient() {
         this(System.getenv());
@@ -158,8 +157,11 @@ final class ProxyValidationClient implements AutoCloseable {
         }
     }
 
-    void pushHandler(final Consumer<ProtocolFrame> pushHandler) {
-        this.pushHandler = Objects.requireNonNull(pushHandler, "pushHandler");
+    void pushHandler(final ProtocolChannel channel, final Consumer<ProtocolFrame> pushHandler) {
+        this.pushHandlers.put(
+            Objects.requireNonNull(channel, "channel"),
+            Objects.requireNonNull(pushHandler, "pushHandler")
+        );
     }
 
     void respond(final ProtocolFrame request, final MessageType messageType, final byte[] payload) throws IOException {
@@ -239,7 +241,14 @@ final class ProxyValidationClient implements AutoCloseable {
                     if (response != null) {
                         response.complete(frame);
                     } else {
-                        this.pushHandler.accept(frame);
+                        final Consumer<ProtocolFrame> handler = this.pushHandlers.get(frame.channel());
+                        if (handler == null) {
+                            this.respond(frame, MessageType.ERROR, "unsupported routed node channel".getBytes(
+                                java.nio.charset.StandardCharsets.UTF_8
+                            ));
+                        } else {
+                            handler.accept(frame);
+                        }
                     }
                 }
             } finally {

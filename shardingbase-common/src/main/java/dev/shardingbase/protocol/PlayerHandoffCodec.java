@@ -34,19 +34,39 @@ public final class PlayerHandoffCodec {
             final UUID playerId = readUuid(input);
             final String target = readString(input);
             final long bits = input.readLong();
-            final EnumSet<PlayerDataCategory> categories = EnumSet.noneOf(PlayerDataCategory.class);
-            long knownBits = 0;
-            for (final PlayerDataCategory category : PlayerDataCategory.values()) {
-                final long bit = 1L << category.ordinal();
-                knownBits |= bit;
-                if ((bits & bit) != 0) {
-                    categories.add(category);
-                }
-            }
-            if ((bits & ~knownBits) != 0 || categories.isEmpty() || input.available() != 0) {
+            final EnumSet<PlayerDataCategory> categories = decodeCategories(bits);
+            if (input.available() != 0) {
                 throw new ProtocolException("Invalid player handoff category mask");
             }
             return new Prepare(playerId, target, categories);
+        }
+    }
+
+    public static byte[] encodeCapture(final Capture capture) throws IOException {
+        final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (DataOutputStream output = new DataOutputStream(bytes)) {
+            writeUuid(output, capture.playerId());
+            writeString(output, capture.targetBackendId());
+            output.writeLong(capture.revision());
+            long categoryBits = 0;
+            for (final PlayerDataCategory category : capture.categories()) {
+                categoryBits |= 1L << category.ordinal();
+            }
+            output.writeLong(categoryBits);
+        }
+        return bytes.toByteArray();
+    }
+
+    public static Capture decodeCapture(final byte[] payload) throws IOException {
+        try (DataInputStream input = input(payload)) {
+            final UUID playerId = readUuid(input);
+            final String target = readString(input);
+            final long revision = input.readLong();
+            final EnumSet<PlayerDataCategory> categories = decodeCategories(input.readLong());
+            if (revision < 1 || input.available() != 0) {
+                throw new ProtocolException("Invalid player capture request");
+            }
+            return new Capture(playerId, target, revision, categories);
         }
     }
 
@@ -163,6 +183,22 @@ public final class PlayerHandoffCodec {
         return new DataInputStream(new ByteArrayInputStream(payload));
     }
 
+    private static EnumSet<PlayerDataCategory> decodeCategories(final long bits) throws ProtocolException {
+        final EnumSet<PlayerDataCategory> categories = EnumSet.noneOf(PlayerDataCategory.class);
+        long knownBits = 0;
+        for (final PlayerDataCategory category : PlayerDataCategory.values()) {
+            final long bit = 1L << category.ordinal();
+            knownBits |= bit;
+            if ((bits & bit) != 0) {
+                categories.add(category);
+            }
+        }
+        if ((bits & ~knownBits) != 0 || categories.isEmpty()) {
+            throw new ProtocolException("Invalid player handoff category mask");
+        }
+        return categories;
+    }
+
     private static void writeUuid(final DataOutputStream output, final UUID value) throws IOException {
         output.writeLong(value.getMostSignificantBits());
         output.writeLong(value.getLeastSignificantBits());
@@ -194,6 +230,16 @@ public final class PlayerHandoffCodec {
             if (playerId == null || targetBackendId == null || targetBackendId.isBlank()
                 || categories == null || categories.isEmpty()) {
                 throw new IllegalArgumentException("Player handoff preparation fields are required");
+            }
+            categories = Set.copyOf(categories);
+        }
+    }
+
+    public record Capture(UUID playerId, String targetBackendId, long revision, Set<PlayerDataCategory> categories) {
+        public Capture {
+            if (playerId == null || targetBackendId == null || targetBackendId.isBlank()
+                || revision < 1 || categories == null || categories.isEmpty()) {
+                throw new IllegalArgumentException("Player capture fields are required");
             }
             categories = Set.copyOf(categories);
         }

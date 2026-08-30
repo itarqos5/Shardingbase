@@ -23,6 +23,17 @@ class PlayerHandoffCodecTest {
         assertEquals(playerId, prepare.playerId());
         assertTrue(prepare.categories().contains(PlayerDataCategory.EXPERIENCE));
 
+        final PlayerHandoffCodec.Capture capture = PlayerHandoffCodec.decodeCapture(
+            PlayerHandoffCodec.encodeCapture(new PlayerHandoffCodec.Capture(
+                playerId,
+                "backend-b",
+                41,
+                EnumSet.of(PlayerDataCategory.INVENTORY, PlayerDataCategory.EXPERIENCE)
+            ))
+        );
+        assertEquals(41, capture.revision());
+        assertTrue(capture.categories().contains(PlayerDataCategory.INVENTORY));
+
         final PlayerHandoffCodec.Acknowledgement acknowledgement = PlayerHandoffCodec.decodeAcknowledgement(
             PlayerHandoffCodec.encodeAcknowledgement(new PlayerHandoffCodec.Acknowledgement(
                 playerId, 42, true, "staged"

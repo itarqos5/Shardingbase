@@ -33,14 +33,10 @@ final class NodeFileTransferHandler implements AutoCloseable {
             task -> Thread.ofPlatform().daemon(true).name("Shardingbase File Transfer").unstarted(task),
             new ThreadPoolExecutor.AbortPolicy()
         );
-        proxy.pushHandler(this::submit);
+        proxy.pushHandler(ProtocolChannel.FILE_TRANSFER, this::submit);
     }
 
     private void submit(final ProtocolFrame frame) {
-        if (frame.channel() != ProtocolChannel.FILE_TRANSFER) {
-            this.error(frame, "unsupported routed node channel");
-            return;
-        }
         try {
             this.ioExecutor.execute(() -> this.handle(frame));
         } catch (RuntimeException _) {

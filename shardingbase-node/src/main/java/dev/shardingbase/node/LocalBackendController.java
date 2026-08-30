@@ -22,6 +22,8 @@ import java.util.Base64;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Authenticated loopback service exposed only to the backend child. */
@@ -33,6 +35,7 @@ final class LocalBackendController implements AutoCloseable {
     private final ProxyValidationClient proxyClient;
     private final ExecutorService clients;
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final ArrayBlockingQueue<ProtocolFrame> backendPushes = new ArrayBlockingQueue<>(64);
     private final Thread acceptThread;
 
     LocalBackendController(final ProxyValidationClient proxyClient) throws IOException {
@@ -49,6 +52,7 @@ final class LocalBackendController implements AutoCloseable {
             .daemon(true)
             .name("Shardingbase Local Control")
             .start(this::acceptLoop);
+        this.proxyClient.pushHandler(dev.shardingbase.protocol.ProtocolChannel.PLAYER_SYNC, this::enqueueBackendPush);
     }
 
     static LocalBackendController start(final ProxyValidationClient proxyClient) throws IOException {
@@ -117,6 +121,27 @@ final class LocalBackendController implements AutoCloseable {
     }
 
     private ProtocolFrame forward(final ProtocolFrame request) throws IOException {
+        if ("node-local".equals(request.targetId()) && request.messageType() == MessageType.BACKEND_POLL) {
+            final ProtocolFrame pushed;
+            try {
+                pushed = this.backendPushes.poll(5, TimeUnit.SECONDS);
+            } catch (final InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while polling backend control messages", exception);
+            }
+            if (pushed != null) {
+                return pushed;
+            }
+            return new ProtocolFrame(
+                ShardingbaseProtocol.VERSION,
+                request.channel(),
+                MessageType.BACKEND_POLL_EMPTY,
+                request.correlationId(),
+                "node",
+                request.sourceId(),
+                new byte[0]
+            );
+        }
         if (request.messageType() == MessageType.VALIDATE_BACKEND_REQUEST) {
             final ValidationRequest validation = ValidationPayloadCodec.decodeRequest(request.payload());
             final ValidationResponse response = this.proxyClient.validate(
@@ -141,6 +166,20 @@ final class LocalBackendController implements AutoCloseable {
             request.targetId(),
             request.payload()
         );
+    }
+
+    private void enqueueBackendPush(final ProtocolFrame frame) {
+        if (this.backendPushes.offer(frame)) {
+            return;
+        }
+        try {
+            this.proxyClient.respond(
+                frame,
+                MessageType.ERROR,
+                "backend control queue is full".getBytes(StandardCharsets.UTF_8)
+            );
+        } catch (IOException _) {
+        }
     }
 
     private static boolean constantTimeEquals(final String expected, final String actual) {
