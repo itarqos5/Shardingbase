@@ -12,6 +12,9 @@ public enum MessageType {
     PLAYER_SNAPSHOT_STAGE,
     PLAYER_SNAPSHOT_ACK,
     ERROR,
+    FILE_BEGIN,
     FILE_CHUNK,
-    FILE_ACK
+    FILE_ACK,
+    FILE_COMPLETE,
+    FILE_ABORT
 }

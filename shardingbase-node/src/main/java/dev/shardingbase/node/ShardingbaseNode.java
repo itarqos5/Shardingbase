@@ -3,6 +3,7 @@ package dev.shardingbase.node;
 import dev.shardingbase.protocol.ShardingbaseProtocol;
 import java.io.IOException;
 import java.net.URISyntaxException;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -34,6 +35,7 @@ public final class ShardingbaseNode {
 
             try (
                 ProxyValidationClient proxyClient = new ProxyValidationClient();
+                NodeFileTransferHandler fileTransfers = new NodeFileTransferHandler(proxyClient, stagingRoot());
                 LocalBackendController controller = LocalBackendController.start(proxyClient)
             ) {
                 System.out.println("Starting the Shardingbase backend as a supervised process.");
@@ -61,5 +63,16 @@ public final class ShardingbaseNode {
 
     static boolean isOneShot(final String[] arguments) {
         return Arrays.stream(arguments).anyMatch(ONE_SHOT_ARGUMENTS::contains);
+    }
+
+    private static Path stagingRoot() {
+        final String configured = System.getenv().getOrDefault(
+            NodeFileTransferHandler.STAGING_ROOT_ENVIRONMENT,
+            "shardingbase-staging"
+        );
+        final Path path = Path.of(configured);
+        return (path.isAbsolute() ? path : Path.of(System.getProperty("user.dir")).resolve(path))
+            .toAbsolutePath()
+            .normalize();
     }
 }

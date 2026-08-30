@@ -123,6 +123,16 @@
             "field_type": "text"
         },
         {
+            "name": "Transfer Staging Root",
+            "description": "Directory used for resumable, hash-verified incoming world files.",
+            "env_variable": "SHARDINGBASE_STAGING_ROOT",
+            "default_value": "shardingbase-staging",
+            "user_viewable": true,
+            "user_editable": false,
+            "rules": "required|string|max:128",
+            "field_type": "text"
+        },
+        {
             "name": "Backup Root",
             "description": "Directory reserved for mandatory transaction backups.",
             "env_variable": "SHARDINGBASE_BACKUP_ROOT",
