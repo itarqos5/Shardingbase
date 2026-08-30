@@ -122,6 +122,7 @@ class WorldTransactionSafetyTest {
         final UUID transactionId = UUID.randomUUID();
         final Path path = ShardManifestWriter.write(world, new ShardManifestWriter.Manifest(
             "minecraft:overworld",
+            UUID.randomUUID(),
             transactionId,
             ShardAxis.Z,
             -4,
@@ -135,7 +136,51 @@ class WorldTransactionSafetyTest {
         }
         assertEquals("1", properties.getProperty("format-version"));
         assertEquals(transactionId.toString(), properties.getProperty("transaction-id"));
+        assertTrue(properties.containsKey("world-id"));
         assertEquals("POSITIVE", properties.getProperty("owned-side"));
+    }
+
+    @Test
+    void atomicallyInstallsAndRollsBackAVerifiedShardTree(@TempDir final Path directory) throws Exception {
+        final Path world = directory.resolve("world");
+        final Path prepared = directory.resolve("prepared");
+        final Path transaction = directory.resolve("transaction");
+        Files.createDirectories(world);
+        Files.createDirectories(prepared);
+        Files.createDirectories(transaction);
+        Files.writeString(world.resolve("level.dat"), "original");
+        Files.writeString(prepared.resolve("level.dat"), "sharded");
+        TransferTreeManifest.write(prepared);
+        final UUID transactionId = UUID.randomUUID();
+
+        final WorldInstallationEngine.InstalledWorld installed = WorldInstallationEngine.install(
+            world,
+            prepared,
+            transaction,
+            "target",
+            new ShardManifestWriter.Manifest(
+                "minecraft:overworld",
+                UUID.randomUUID(),
+                transactionId,
+                ShardAxis.X,
+                0,
+                ShardSide.POSITIVE,
+                "peer"
+            )
+        );
+
+        assertEquals("sharded", Files.readString(world.resolve("level.dat")));
+        assertTrue(Files.isRegularFile(world.resolve(ShardManifestWriter.FILE_NAME)));
+        assertEquals("original", Files.readString(installed.retiredOriginal().resolve("level.dat")));
+
+        WorldInstallationEngine.rollback(
+            world,
+            installed.retiredOriginal(),
+            false,
+            transaction.resolve("target-failed")
+        );
+        assertEquals("original", Files.readString(world.resolve("level.dat")));
+        assertEquals("sharded", Files.readString(transaction.resolve("target-failed/level.dat")));
     }
 
     private static void writeRegion(final Path path) throws IOException {

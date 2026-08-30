@@ -26,6 +26,7 @@ public final class ShardManifestWriter {
         final Properties properties = new Properties();
         properties.setProperty("format-version", "1");
         properties.setProperty("world-key", manifest.worldKey());
+        properties.setProperty("world-id", manifest.worldId().toString());
         properties.setProperty("transaction-id", manifest.transactionId().toString());
         properties.setProperty("axis", manifest.axis().name());
         properties.setProperty("cut-chunk", Integer.toString(manifest.cutChunk()));
@@ -53,6 +54,7 @@ public final class ShardManifestWriter {
 
     public record Manifest(
         String worldKey,
+        UUID worldId,
         UUID transactionId,
         ShardAxis axis,
         int cutChunk,
@@ -60,7 +62,8 @@ public final class ShardManifestWriter {
         String peerId
     ) {
         public Manifest {
-            if (worldKey == null || worldKey.isBlank() || transactionId == null || axis == null || ownedSide == null
+            if (worldKey == null || worldKey.isBlank() || worldId == null || transactionId == null
+                || axis == null || ownedSide == null
                 || peerId == null || peerId.isBlank()) {
                 throw new IllegalArgumentException("Shard manifest fields are required");
             }

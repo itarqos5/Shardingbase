@@ -19,6 +19,7 @@ final class ShardManifestRegistry {
     private static final Set<String> FIELDS = Set.of(
         "format-version",
         "world-key",
+        "world-id",
         "transaction-id",
         "axis",
         "cut-chunk",
@@ -88,12 +89,13 @@ final class ShardManifestRegistry {
                 throw new IllegalArgumentException("unsupported format-version");
             }
             final String worldKey = nonBlank(properties, "world-key");
+            final UUID worldId = UUID.fromString(properties.getProperty("world-id"));
             final UUID transactionId = UUID.fromString(properties.getProperty("transaction-id"));
             final Axis axis = Axis.valueOf(properties.getProperty("axis"));
             final int cutChunk = Integer.parseInt(properties.getProperty("cut-chunk"));
             final Side side = Side.valueOf(properties.getProperty("owned-side"));
             final String peerId = nonBlank(properties, "peer-id");
-            return new Manifest(worldKey, transactionId, axis, cutChunk, side, peerId);
+            return new Manifest(worldKey, worldId, transactionId, axis, cutChunk, side, peerId);
         } catch (final IllegalArgumentException | NullPointerException exception) {
             throw new ShardingbaseConfigurationException("Invalid shard manifest " + path + ": " + exception.getMessage(), exception);
         }
@@ -119,6 +121,7 @@ final class ShardManifestRegistry {
 
     private record Manifest(
         String worldKey,
+        UUID worldId,
         UUID transactionId,
         Axis axis,
         int cutChunk,

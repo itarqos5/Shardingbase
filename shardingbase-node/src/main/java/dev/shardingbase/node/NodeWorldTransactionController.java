@@ -3,6 +3,12 @@ package dev.shardingbase.node;
 import dev.shardingbase.node.world.OfflineWorldTransactionPreparer;
 import dev.shardingbase.node.world.OfflineTargetTransactionPreparer;
 import dev.shardingbase.node.world.ShardAxis;
+import dev.shardingbase.node.world.ShardManifestWriter;
+import dev.shardingbase.node.world.ShardSide;
+import dev.shardingbase.node.world.TransferTreeManifest;
+import dev.shardingbase.node.world.WorldInstallationEngine;
+import dev.shardingbase.node.world.WorldTransactionJournal;
+import dev.shardingbase.node.world.TransactionPhase;
 import dev.shardingbase.protocol.MessageType;
 import dev.shardingbase.protocol.ProtocolChannel;
 import dev.shardingbase.protocol.ProtocolFrame;
@@ -43,12 +49,14 @@ final class NodeWorldTransactionController implements AutoCloseable {
     private final ProxyValidationClient proxy;
     private final LocalBackendController local;
     private final BackendProcess backend;
+    private final ResumableFileSender fileSender;
     private final String nodeId;
     private final byte[] signingKey;
     private final String unavailableDetail;
     private final Path worldRoot;
     private final Path backupRoot;
     private final Path transactionRoot;
+    private final Path stagingRoot;
     private final ExecutorService worker = Executors.newSingleThreadExecutor(task -> Thread.ofPlatform()
         .daemon(true)
         .name("Shardingbase World Transaction")
@@ -60,6 +68,7 @@ final class NodeWorldTransactionController implements AutoCloseable {
         new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, OfflineTargetTransactionPreparer.PreparedTarget> preparedTargets =
         new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, InstalledRecord> installed = new ConcurrentHashMap<>();
     private final AtomicReference<UUID> activeTransaction = new AtomicReference<>();
     private final AtomicBoolean closed = new AtomicBoolean();
 
@@ -72,6 +81,7 @@ final class NodeWorldTransactionController implements AutoCloseable {
         this.proxy = proxy;
         this.local = local;
         this.backend = backend;
+        this.fileSender = new ResumableFileSender(proxy);
         final String configuredNodeId = environment.get(ProxyValidationClient.NODE_ID_ENVIRONMENT_VARIABLE);
         final String configuredSigningKey = environment.get(SIGNING_KEY_ENVIRONMENT);
         this.nodeId = configuredNodeId == null ? "" : configuredNodeId;
@@ -94,6 +104,11 @@ final class NodeWorldTransactionController implements AutoCloseable {
             environment.get(TRANSACTION_ROOT_ENVIRONMENT),
             workingDirectory,
             workingDirectory.resolve("shardingbase-transactions")
+        );
+        this.stagingRoot = configuredPath(
+            environment.get(NodeFileTransferHandler.STAGING_ROOT_ENVIRONMENT),
+            workingDirectory,
+            workingDirectory.resolve("shardingbase-staging")
         );
         if (this.backupRoot.equals(this.transactionRoot)
             || this.backupRoot.startsWith(this.transactionRoot)
@@ -149,6 +164,10 @@ final class NodeWorldTransactionController implements AutoCloseable {
                 case PREPARE_SOURCE -> this.prepareSource(request);
                 case RESTART_BACKEND -> this.restart(request);
                 case PREPARE_TARGET -> this.prepareTarget(request);
+                case RELAY_TARGET -> this.relayTarget(request);
+                case INSTALL_TARGET -> this.installTarget(request);
+                case COMMIT_SOURCE -> this.commitSource(request);
+                case ROLLBACK -> this.rollback(request);
             };
             this.proxy.respond(frame, MessageType.WORLD_TRANSACTION_RESPONSE,
                 WorldTransactionCodec.encodeResponse(response));
@@ -317,6 +336,171 @@ final class NodeWorldTransactionController implements AutoCloseable {
             result.worldInitiallyAbsent()
                 ? "target absence rollback point prepared"
                 : "complete target world backup prepared"
+        );
+    }
+
+    private Response relayTarget(final Request request) throws IOException {
+        this.requireAuthorization(request);
+        final Manifest manifest = request.signedManifest().manifest();
+        if (!this.nodeId.equals(manifest.sourceNodeId())) {
+            return this.status(request, Outcome.REJECTED, "only the source node may relay a shard tree");
+        }
+        if (this.backend.status().running()) {
+            return this.status(request, Outcome.REJECTED, "source backend must remain stopped during relay");
+        }
+        final OfflineWorldTransactionPreparer.PreparedTransaction prepared =
+            this.prepared.get(manifest.transactionId());
+        if (prepared == null) {
+            return this.status(request, Outcome.REJECTED, "source shard tree has not been prepared");
+        }
+        final Path targetHalf = manifest.targetNodeId().equals(manifest.negativeNodeId())
+            ? prepared.negativeHalf()
+            : prepared.positiveHalf();
+        final ResumableFileSender.TransferSummary summary = this.fileSender.sendTree(
+            manifest.transactionId(),
+            targetHalf,
+            manifest.targetNodeId()
+        );
+        return this.status(
+            request,
+            Outcome.SUCCESS,
+            "relayed " + summary.contentFiles() + " manifested files and " + summary.contentBytes()
+                + " content bytes to the target"
+        );
+    }
+
+    private Response installTarget(final Request request) throws IOException {
+        this.requireAuthorization(request);
+        final Manifest manifest = request.signedManifest().manifest();
+        if (!this.nodeId.equals(manifest.targetNodeId())) {
+            return this.status(request, Outcome.REJECTED, "only the target node may install relayed world data");
+        }
+        if (this.backend.status().running()) {
+            return this.status(request, Outcome.REJECTED, "target backend must remain stopped during installation");
+        }
+        final OfflineTargetTransactionPreparer.PreparedTarget prepared =
+            this.preparedTargets.get(manifest.transactionId());
+        if (prepared == null) {
+            return this.status(request, Outcome.REJECTED, "target rollback point has not been prepared");
+        }
+        if (this.installed.containsKey(manifest.transactionId())) {
+            return this.status(request, Outcome.SUCCESS, "target shard is already installed");
+        }
+        final Path staged = this.stagingRoot.resolve(
+            Path.of("transactions", manifest.transactionId().toString(), "world")
+        ).toAbsolutePath().normalize();
+        if (!staged.startsWith(this.stagingRoot)) {
+            throw new IOException("Target staging path escapes the configured staging root");
+        }
+        TransferTreeManifest.verify(staged);
+        final Path transactionDirectory = prepared.journal().getParent();
+        final WorldInstallationEngine.InstalledWorld result = WorldInstallationEngine.install(
+            this.resolveWorld(manifest.worldDirectory()),
+            staged,
+            transactionDirectory,
+            "target",
+            shardManifest(manifest, false)
+        );
+        final WorldTransactionJournal journal = WorldTransactionJournal.load(prepared.journal());
+        journal.advance(TransactionPhase.TARGET_PREPARED);
+        this.installed.put(manifest.transactionId(), new InstalledRecord(
+            result,
+            prepared.worldInitiallyAbsent(),
+            prepared.journal(),
+            "target"
+        ));
+        return this.status(request, Outcome.SUCCESS, "target shard verified and atomically installed");
+    }
+
+    private Response commitSource(final Request request) throws IOException {
+        this.requireAuthorization(request);
+        final Manifest manifest = request.signedManifest().manifest();
+        if (!this.nodeId.equals(manifest.sourceNodeId())) {
+            return this.status(request, Outcome.REJECTED, "only the source node may commit source deletion");
+        }
+        if (this.backend.status().running()) {
+            return this.status(request, Outcome.REJECTED, "source backend must remain stopped during commit");
+        }
+        final OfflineWorldTransactionPreparer.PreparedTransaction prepared =
+            this.prepared.get(manifest.transactionId());
+        if (prepared == null) {
+            return this.status(request, Outcome.REJECTED, "source shard tree has not been prepared");
+        }
+        if (this.installed.containsKey(manifest.transactionId())) {
+            return this.status(request, Outcome.SUCCESS, "source shard is already committed");
+        }
+        final Path localHalf = this.nodeId.equals(manifest.negativeNodeId())
+            ? prepared.negativeHalf()
+            : prepared.positiveHalf();
+        TransferTreeManifest.write(localHalf);
+        TransferTreeManifest.verify(localHalf);
+        final WorldTransactionJournal journal = WorldTransactionJournal.load(prepared.journal());
+        if (journal.phase() == TransactionPhase.SPLIT_COMPLETE) {
+            journal.advance(TransactionPhase.TARGET_PREPARED);
+        } else if (journal.phase() != TransactionPhase.TARGET_PREPARED) {
+            throw new IOException("Source journal cannot commit from phase " + journal.phase());
+        }
+        final WorldInstallationEngine.InstalledWorld result = WorldInstallationEngine.install(
+            this.resolveWorld(manifest.worldDirectory()),
+            localHalf,
+            prepared.journal().getParent(),
+            "source",
+            shardManifest(manifest, true)
+        );
+        journal.advance(TransactionPhase.SOURCE_COMMITTED);
+        this.installed.put(manifest.transactionId(), new InstalledRecord(
+            result,
+            false,
+            prepared.journal(),
+            "source"
+        ));
+        return this.status(
+            request,
+            Outcome.SUCCESS,
+            "source shard atomically committed after target acknowledgement"
+        );
+    }
+
+    private Response rollback(final Request request) throws IOException {
+        this.requireAuthorization(request);
+        final Manifest manifest = request.signedManifest().manifest();
+        final InstalledRecord record = this.installed.remove(manifest.transactionId());
+        Path journalPath = null;
+        if (record != null) {
+            final Path failed = record.journal().getParent().resolve(record.role() + "-failed");
+            WorldInstallationEngine.rollback(
+                this.resolveWorld(manifest.worldDirectory()),
+                record.world().retiredOriginal(),
+                record.worldInitiallyAbsent(),
+                failed
+            );
+            journalPath = record.journal();
+        } else if (this.nodeId.equals(manifest.sourceNodeId())) {
+            final var source = this.prepared.get(manifest.transactionId());
+            journalPath = source == null ? null : source.journal();
+        } else {
+            final var target = this.preparedTargets.get(manifest.transactionId());
+            journalPath = target == null ? null : target.journal();
+        }
+        if (journalPath != null) {
+            final WorldTransactionJournal journal = WorldTransactionJournal.load(journalPath);
+            if (journal.phase() != TransactionPhase.ROLLED_BACK) {
+                journal.advance(TransactionPhase.ROLLED_BACK);
+            }
+        }
+        return this.status(request, Outcome.SUCCESS, "local transaction state rolled back; diagnostics retained");
+    }
+
+    private ShardManifestWriter.Manifest shardManifest(final Manifest manifest, final boolean source) {
+        final boolean negative = this.nodeId.equals(manifest.negativeNodeId());
+        return new ShardManifestWriter.Manifest(
+            manifest.worldKey(),
+            manifest.worldId(),
+            manifest.transactionId(),
+            manifest.axis() == WorldTransactionCodec.Axis.X ? ShardAxis.X : ShardAxis.Z,
+            manifest.cutChunk(),
+            negative ? ShardSide.NEGATIVE : ShardSide.POSITIVE,
+            source ? manifest.targetBackendId() : manifest.sourceBackendId()
         );
     }
 
@@ -491,5 +675,13 @@ final class NodeWorldTransactionController implements AutoCloseable {
         this.backendAuthorizations.forEach((id, future) ->
             future.completeExceptionally(new IOException("Node transaction controller is shutting down")));
         this.backendAuthorizations.clear();
+    }
+
+    private record InstalledRecord(
+        WorldInstallationEngine.InstalledWorld world,
+        boolean worldInitiallyAbsent,
+        Path journal,
+        String role
+    ) {
     }
 }

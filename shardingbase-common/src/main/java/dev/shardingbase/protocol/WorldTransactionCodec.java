@@ -251,7 +251,11 @@ public final class WorldTransactionCodec {
         PREPARE_SOURCE,
         RESTART_BACKEND,
         STATUS,
-        PREPARE_TARGET
+        PREPARE_TARGET,
+        RELAY_TARGET,
+        INSTALL_TARGET,
+        COMMIT_SOURCE,
+        ROLLBACK
     }
 
     public enum Outcome {
