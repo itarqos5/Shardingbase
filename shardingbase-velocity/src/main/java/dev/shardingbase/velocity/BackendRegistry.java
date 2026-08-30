@@ -30,11 +30,13 @@ final class BackendRegistry {
                     minecraft_version TEXT NOT NULL,
                     shardingbase_version TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    status_detail TEXT NOT NULL,
                     last_seen_epoch_ms INTEGER NOT NULL
                 )
                 """)) {
                 statement.executeUpdate();
             }
+            ensureColumn(connection, "backends", "status_detail", "TEXT NOT NULL DEFAULT ''");
         } catch (final SQLException exception) {
             throw new IOException("Unable to initialize " + databasePath, exception);
         }
@@ -68,14 +70,22 @@ final class BackendRegistry {
 
                 try (PreparedStatement statement = connection.prepareStatement("""
                     INSERT INTO backends (
-                        server_id, server_name, node_id, minecraft_version, shardingbase_version, status, last_seen_epoch_ms
-                    ) VALUES (?, ?, ?, ?, ?, 'ONLINE', ?)
+                        server_id, server_name, node_id, minecraft_version, shardingbase_version,
+                        status, status_detail, last_seen_epoch_ms
+                    ) VALUES (?, ?, ?, ?, ?, 'ONLINE', 'validated', ?)
                     ON CONFLICT(server_id) DO UPDATE SET
                         server_name = excluded.server_name,
                         node_id = excluded.node_id,
                         minecraft_version = excluded.minecraft_version,
                         shardingbase_version = excluded.shardingbase_version,
-                        status = 'ONLINE',
+                        status = CASE
+                            WHEN backends.status = 'MAINTENANCE' THEN backends.status
+                            ELSE 'ONLINE'
+                        END,
+                        status_detail = CASE
+                            WHEN backends.status = 'MAINTENANCE' THEN backends.status_detail
+                            ELSE 'validated'
+                        END,
                         last_seen_epoch_ms = excluded.last_seen_epoch_ms
                     """)) {
                     statement.setString(1, request.serverId());
@@ -177,12 +187,86 @@ final class BackendRegistry {
         }
     }
 
+    synchronized Optional<BackendStatus> statusForName(final String serverName) throws IOException {
+        try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement(
+            "SELECT server_id, server_name, status, status_detail FROM backends WHERE server_name = ? LIMIT 1"
+        )) {
+            statement.setString(1, serverName);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? Optional.of(new BackendStatus(
+                    result.getString("server_id"),
+                    result.getString("server_name"),
+                    result.getString("status"),
+                    result.getString("status_detail")
+                )) : Optional.empty();
+            }
+        } catch (final SQLException exception) {
+            throw new IOException("SQLite backend status lookup failed", exception);
+        }
+    }
+
+    synchronized void setPairStatus(
+        final List<String> serverIds,
+        final String status,
+        final String detail
+    ) throws IOException {
+        if (serverIds.size() != 2 || serverIds.get(0).equals(serverIds.get(1))
+            || !status.matches("[A-Z_]{2,32}") || detail == null || detail.isBlank()) {
+            throw new IllegalArgumentException("Exactly two distinct backends and a status detail are required");
+        }
+        try (Connection connection = this.connection()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement statement = connection.prepareStatement(
+                "UPDATE backends SET status = ?, status_detail = ? WHERE server_id = ?"
+            )) {
+                int updated = 0;
+                for (final String serverId : serverIds) {
+                    statement.setString(1, status);
+                    statement.setString(2, detail);
+                    statement.setString(3, serverId);
+                    updated += statement.executeUpdate();
+                }
+                if (updated != 2) {
+                    connection.rollback();
+                    throw new IOException("Both transaction backends must be registered before changing status");
+                }
+                connection.commit();
+            } catch (final SQLException | IOException exception) {
+                connection.rollback();
+                throw exception;
+            }
+        } catch (final SQLException exception) {
+            throw new IOException("Unable to update backend maintenance state", exception);
+        }
+    }
+
     private Connection connection() throws SQLException {
         final Connection connection = DriverManager.getConnection(this.jdbcUrl);
         try (PreparedStatement statement = connection.prepareStatement("PRAGMA busy_timeout = 5000")) {
             statement.execute();
         }
         return connection;
+    }
+
+    private static void ensureColumn(
+        final Connection connection,
+        final String table,
+        final String column,
+        final String declaration
+    ) throws SQLException {
+        try (
+            PreparedStatement statement = connection.prepareStatement("PRAGMA table_info(" + table + ")");
+            ResultSet result = statement.executeQuery()
+        ) {
+            while (result.next()) {
+                if (column.equals(result.getString("name"))) {
+                    return;
+                }
+            }
+        }
+        try (var statement = connection.createStatement()) {
+            statement.executeUpdate("ALTER TABLE " + table + " ADD COLUMN " + column + ' ' + declaration);
+        }
     }
 
     private static Existing find(final Connection connection, final String column, final String value) throws SQLException {
@@ -257,5 +341,11 @@ final class BackendRegistry {
     }
 
     record BackendTarget(String serverId, String serverName, String nodeId) {
+    }
+
+    record BackendStatus(String serverId, String serverName, String status, String detail) {
+        boolean maintenance() {
+            return "MAINTENANCE".equals(this.status);
+        }
     }
 }

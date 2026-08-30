@@ -43,6 +43,23 @@ final class PlayerTransferCoordinator {
             return null;
         }
         final RegisteredServer target = event.getResult().getServer().orElse(event.getOriginalServer());
+        try {
+            final BackendRegistry.BackendStatus status = this.registry
+                .statusForName(target.getServerInfo().getName())
+                .orElse(null);
+            if (status != null && status.maintenance()) {
+                event.setResult(ServerPreConnectEvent.ServerResult.denied());
+                event.getPlayer().sendMessage(Component.text("Shardingbase maintenance: " + status.detail()));
+                return null;
+            }
+        } catch (final IOException exception) {
+            event.setResult(ServerPreConnectEvent.ServerResult.denied());
+            event.getPlayer().sendMessage(Component.text(
+                "Shardingbase could not verify backend maintenance state; connection denied safely."
+            ));
+            this.logger.warn("Unable to verify Shardingbase maintenance state", exception);
+            return null;
+        }
         final RegisteredServer source = event.getPreviousServer();
         if (source == null || source.getServerInfo().getName().equals(target.getServerInfo().getName())) {
             return null;
