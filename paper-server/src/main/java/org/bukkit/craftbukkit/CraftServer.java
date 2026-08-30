@@ -273,6 +273,7 @@ public final class CraftServer implements Server {
     private final StandardMessenger messenger = new StandardMessenger();
     private final SimplePluginManager pluginManager; // Paper - Move down
     public final io.papermc.paper.plugin.manager.PaperPluginManagerImpl paperPluginManager;
+    private final dev.shardingbase.server.ShardingbaseRuntime shardingbaseRuntime; // Shardingbase
     private final StructureManager structureManager;
     final DedicatedServer console;
     private final DedicatedPlayerList playerList;
@@ -411,6 +412,19 @@ public final class CraftServer implements Server {
         this.paperPluginManager = new io.papermc.paper.plugin.manager.PaperPluginManagerImpl(this, this.commandMap, pluginManager);
         this.pluginManager.paperPluginManager = this.paperPluginManager;
          // Paper end
+
+        // Shardingbase start - initialize before plugin discovery
+        try {
+            this.shardingbaseRuntime = dev.shardingbase.server.ShardingbaseRuntime.start(console.getServerDirectory(), this.logger);
+        } catch (final dev.shardingbase.server.config.ShardingbaseConfigurationException exception) {
+            throw new IllegalStateException("Fatal Shardingbase configuration error: " + exception.getMessage(), exception);
+        }
+        dev.shardingbase.api.Shardingbase.installService(this.shardingbaseRuntime);
+        this.pluginManager.addPermission(new org.bukkit.permissions.Permission("shardingbase.admin", org.bukkit.permissions.PermissionDefault.OP));
+        this.pluginManager.addPermission(new org.bukkit.permissions.Permission("shardingbase.reload", org.bukkit.permissions.PermissionDefault.OP));
+        this.pluginManager.addPermission(new org.bukkit.permissions.Permission("shardingbase.sync", org.bukkit.permissions.PermissionDefault.OP));
+        this.commandMap.register("shardingbase", new dev.shardingbase.server.ShardingbaseCommand(this.shardingbaseRuntime, console::execute));
+        // Shardingbase end
 
         CraftRegistry.setMinecraftRegistry(console.registryAccess());
 
@@ -604,6 +618,12 @@ public final class CraftServer implements Server {
 
     public void disablePlugins() {
         this.pluginManager.disablePlugins();
+        // Shardingbase start - preserve the service across plugin reload, close it only on process shutdown
+        if (this.console.hasStopped()) {
+            this.shardingbaseRuntime.close();
+            dev.shardingbase.api.Shardingbase.clearService();
+        }
+        // Shardingbase end
     }
 
     public void syncCommands() {
