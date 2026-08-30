@@ -13,6 +13,9 @@ import java.util.Arrays;
 import java.util.Optional;
 import java.util.UUID;
 import dev.shardingbase.protocol.PlayerHandoffCodec;
+import dev.shardingbase.protocol.PlayerDataCategory;
+import java.util.EnumSet;
+import java.util.Set;
 
 /** SQLite authority for monotonic, idempotent portable player snapshots. */
 final class PlayerStateStore {
@@ -41,9 +44,65 @@ final class PlayerStateStore {
                 """)) {
                 statement.executeUpdate();
             }
+            try (PreparedStatement statement = connection.prepareStatement("""
+                CREATE TABLE IF NOT EXISTS player_sync_settings (
+                    singleton_id INTEGER PRIMARY KEY NOT NULL CHECK (singleton_id = 1),
+                    category_mask INTEGER NOT NULL
+                )
+                """)) {
+                statement.executeUpdate();
+            }
         } catch (final SQLException exception) {
             throw failure("Unable to initialize player snapshot storage", exception);
         }
+    }
+
+    synchronized Set<PlayerDataCategory> categories() throws IOException {
+        try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement(
+            "SELECT category_mask FROM player_sync_settings WHERE singleton_id = 1"
+        ); ResultSet result = statement.executeQuery()) {
+            if (!result.next()) {
+                return Set.copyOf(EnumSet.allOf(PlayerDataCategory.class));
+            }
+            return categoriesFromMask(result.getLong("category_mask"));
+        } catch (final SQLException exception) {
+            throw failure("Unable to load player synchronization settings", exception);
+        }
+    }
+
+    synchronized void categories(final Set<PlayerDataCategory> categories) throws IOException {
+        if (categories == null || categories.isEmpty()) {
+            throw new IOException("At least one portable player category must remain enabled");
+        }
+        long bits = 0;
+        for (final PlayerDataCategory category : categories) {
+            bits |= 1L << category.ordinal();
+        }
+        try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement("""
+            INSERT INTO player_sync_settings (singleton_id, category_mask) VALUES (1, ?)
+            ON CONFLICT(singleton_id) DO UPDATE SET category_mask = excluded.category_mask
+            """)) {
+            statement.setLong(1, bits);
+            statement.executeUpdate();
+        } catch (final SQLException exception) {
+            throw failure("Unable to store player synchronization settings", exception);
+        }
+    }
+
+    private static Set<PlayerDataCategory> categoriesFromMask(final long bits) throws IOException {
+        long knownBits = 0;
+        final EnumSet<PlayerDataCategory> categories = EnumSet.noneOf(PlayerDataCategory.class);
+        for (final PlayerDataCategory category : PlayerDataCategory.values()) {
+            final long bit = 1L << category.ordinal();
+            knownBits |= bit;
+            if ((bits & bit) != 0) {
+                categories.add(category);
+            }
+        }
+        if (categories.isEmpty() || (bits & ~knownBits) != 0) {
+            throw new IOException("Stored player synchronization category mask is invalid");
+        }
+        return Set.copyOf(categories);
     }
 
     synchronized long reserveRevision(final UUID playerId) throws IOException {

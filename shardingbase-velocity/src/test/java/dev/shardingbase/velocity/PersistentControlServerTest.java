@@ -8,6 +8,7 @@ import dev.shardingbase.protocol.NodeAuthenticationCodec;
 import dev.shardingbase.protocol.PlayerDataCategory;
 import dev.shardingbase.protocol.PlayerHandoffCodec;
 import dev.shardingbase.protocol.PlayerSnapshot;
+import dev.shardingbase.protocol.PlayerSettingsCodec;
 import dev.shardingbase.protocol.ProtocolChannel;
 import dev.shardingbase.protocol.ProtocolFrame;
 import dev.shardingbase.protocol.ShardingbaseProtocol;
@@ -90,6 +91,17 @@ class PersistentControlServerTest {
             final ProtocolFrame pushed = FrameCodec.read(socket.getInputStream());
             assertEquals(MessageType.PLAYER_SNAPSHOT_CAPTURE, pushed.messageType());
             assertEquals(3, PlayerHandoffCodec.decodeCapture(pushed.payload()).revision());
+
+            final UUID settingsId = UUID.randomUUID();
+            final var selectedCategories = EnumSet.of(PlayerDataCategory.INVENTORY, PlayerDataCategory.HEALTH);
+            FrameCodec.write(socket.getOutputStream(), frame(
+                MessageType.PLAYER_SETTINGS_SET,
+                settingsId,
+                PlayerSettingsCodec.encode(selectedCategories)
+            ));
+            final ProtocolFrame settings = FrameCodec.read(socket.getInputStream());
+            assertEquals(MessageType.PLAYER_SETTINGS_RESPONSE, settings.messageType());
+            assertEquals(selectedCategories, PlayerSettingsCodec.decode(settings.payload()));
 
             final UUID validationId = UUID.randomUUID();
             FrameCodec.write(socket.getOutputStream(), frame(

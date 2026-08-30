@@ -18,6 +18,7 @@ import dev.shardingbase.server.validation.LocalNodeValidator;
 import dev.shardingbase.server.validation.ValidationResult;
 import dev.shardingbase.server.player.PlayerStateCoordinator;
 import dev.shardingbase.protocol.PlayerHandoffCodec;
+import dev.shardingbase.protocol.PlayerDataCategory;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Objects;
@@ -206,6 +207,21 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     /** Returns whether source-side interaction is frozen for a managed handoff. */
     public boolean isPlayerStateFrozen(final UUID playerId) {
         return this.playerStateCoordinator.frozen(playerId);
+    }
+
+    /** Returns the last successfully loaded network-wide player category selection. */
+    public java.util.Set<PlayerDataCategory> playerDataCategories() {
+        return this.playerStateCoordinator.categories();
+    }
+
+    /** Toggles a logical GUI option at the Velocity SQLite authority. */
+    public CompletionStage<java.util.Set<PlayerDataCategory>> togglePlayerDataCategories(
+        final java.util.Set<PlayerDataCategory> categories
+    ) {
+        if (this.featureState() != FeatureState.ENABLED) {
+            return CompletableFuture.failedFuture(new IllegalStateException(this.statusDetail()));
+        }
+        return this.playerStateCoordinator.toggle(categories);
     }
 
     private void beginValidation(final ServerIdentity identity) {

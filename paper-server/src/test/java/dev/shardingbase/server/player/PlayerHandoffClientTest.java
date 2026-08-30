@@ -7,6 +7,7 @@ import dev.shardingbase.protocol.MessageType;
 import dev.shardingbase.protocol.PlayerDataCategory;
 import dev.shardingbase.protocol.PlayerHandoffCodec;
 import dev.shardingbase.protocol.PlayerSnapshot;
+import dev.shardingbase.protocol.PlayerSettingsCodec;
 import dev.shardingbase.protocol.ProtocolFrame;
 import dev.shardingbase.protocol.ShardingbaseProtocol;
 import java.util.EnumSet;
@@ -20,6 +21,7 @@ class PlayerHandoffClientTest {
     void preparesStagesAndFetchesCorrelatedSnapshots() throws Exception {
         final UUID playerId = UUID.randomUUID();
         final AtomicReference<PlayerHandoffCodec.Stage> staged = new AtomicReference<>();
+        final EnumSet<PlayerDataCategory> categories = EnumSet.of(PlayerDataCategory.INVENTORY);
         final PlayerHandoffClient client = new PlayerHandoffClient("backend-a", (
             sourceId, channel, messageType, targetId, payload
         ) -> {
@@ -50,6 +52,14 @@ class PlayerHandoffClientTest {
                     );
                     responseType = MessageType.PLAYER_SNAPSHOT_FETCH_RESPONSE;
                 }
+                case PLAYER_SETTINGS_GET -> {
+                    responsePayload = PlayerSettingsCodec.encode(categories);
+                    responseType = MessageType.PLAYER_SETTINGS_RESPONSE;
+                }
+                case PLAYER_SETTINGS_SET -> {
+                    responsePayload = PlayerSettingsCodec.encode(PlayerSettingsCodec.decode(payload));
+                    responseType = MessageType.PLAYER_SETTINGS_RESPONSE;
+                }
                 default -> throw new AssertionError(messageType);
             }
             return new ProtocolFrame(
@@ -62,7 +72,6 @@ class PlayerHandoffClientTest {
                 responsePayload
             );
         });
-        final EnumSet<PlayerDataCategory> categories = EnumSet.of(PlayerDataCategory.INVENTORY);
         final long revision = client.prepare(playerId, "backend-b", categories);
         final PlayerSnapshot snapshot = new PlayerSnapshot(
             playerId,
@@ -76,5 +85,7 @@ class PlayerHandoffClientTest {
         assertEquals(7, revision);
         assertTrue(client.fetch(playerId).isPresent());
         assertEquals(7, client.fetch(playerId).orElseThrow().snapshot().revision());
+        assertEquals(categories, client.settings());
+        assertEquals(categories, client.settings(categories));
     }
 }

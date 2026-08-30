@@ -12,6 +12,7 @@ import dev.shardingbase.protocol.PlayerDataCategory;
 import dev.shardingbase.protocol.PlayerHandoffCodec;
 import dev.shardingbase.protocol.PlayerSnapshot;
 import java.util.Map;
+import java.util.EnumSet;
 
 class PlayerStateStoreTest {
     @Test
@@ -85,5 +86,17 @@ class PlayerStateStoreTest {
 
         assertTrue(store.awaitStage(playerId, 8, "backend-b", 2_000));
         writer.join();
+    }
+
+    @Test
+    void persistsNetworkWideCategorySelection(@TempDir final Path directory) throws Exception {
+        final Path database = directory.resolve("shardingbase.db");
+        final PlayerStateStore store = new PlayerStateStore(database);
+        assertEquals(EnumSet.allOf(PlayerDataCategory.class), store.categories());
+
+        final var selected = EnumSet.of(PlayerDataCategory.INVENTORY, PlayerDataCategory.HEALTH);
+        store.categories(selected);
+
+        assertEquals(selected, new PlayerStateStore(database).categories());
     }
 }

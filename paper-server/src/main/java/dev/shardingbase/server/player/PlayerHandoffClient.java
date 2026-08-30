@@ -4,6 +4,7 @@ import dev.shardingbase.protocol.MessageType;
 import dev.shardingbase.protocol.PlayerDataCategory;
 import dev.shardingbase.protocol.PlayerHandoffCodec;
 import dev.shardingbase.protocol.PlayerSnapshot;
+import dev.shardingbase.protocol.PlayerSettingsCodec;
 import dev.shardingbase.protocol.ProtocolChannel;
 import dev.shardingbase.protocol.ProtocolFrame;
 import dev.shardingbase.server.validation.LocalNodeClient;
@@ -85,6 +86,32 @@ public final class PlayerHandoffClient {
         );
         requireType(response, MessageType.PLAYER_SNAPSHOT_FETCH_RESPONSE);
         return Optional.ofNullable(PlayerHandoffCodec.decodeFetchResponse(response.payload()).stage());
+    }
+
+    /** Loads the network-authoritative portable category selection. */
+    public Set<PlayerDataCategory> settings() throws IOException {
+        final ProtocolFrame response = this.node.request(
+            this.backendId,
+            ProtocolChannel.PLAYER_SYNC,
+            MessageType.PLAYER_SETTINGS_GET,
+            "velocity",
+            new byte[0]
+        );
+        requireType(response, MessageType.PLAYER_SETTINGS_RESPONSE);
+        return PlayerSettingsCodec.decode(response.payload());
+    }
+
+    /** Atomically replaces and returns the network-authoritative portable category selection. */
+    public Set<PlayerDataCategory> settings(final Set<PlayerDataCategory> categories) throws IOException {
+        final ProtocolFrame response = this.node.request(
+            this.backendId,
+            ProtocolChannel.PLAYER_SYNC,
+            MessageType.PLAYER_SETTINGS_SET,
+            "velocity",
+            PlayerSettingsCodec.encode(categories)
+        );
+        requireType(response, MessageType.PLAYER_SETTINGS_RESPONSE);
+        return PlayerSettingsCodec.decode(response.payload());
     }
 
     private static void requireType(final ProtocolFrame response, final MessageType expected) throws IOException {

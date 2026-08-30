@@ -2,9 +2,11 @@ package dev.shardingbase.server.menu;
 
 import dev.shardingbase.api.FeatureState;
 import dev.shardingbase.server.ShardingbaseRuntime;
+import dev.shardingbase.protocol.PlayerDataCategory;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
@@ -80,6 +82,11 @@ public final class ShardingbaseMenuManager {
             for (final String line : button.lore()) {
                 lore.add(MINI_MESSAGE.deserialize(line));
             }
+            final Set<PlayerDataCategory> categories = categories(button.id());
+            if (DefaultMenus.PLAYER_DATA.equals(menuId) && !categories.isEmpty()) {
+                final boolean enabled = this.runtime.playerDataCategories().containsAll(categories);
+                lore.add(MINI_MESSAGE.deserialize(enabled ? "<green>Enabled" : "<red>Disabled"));
+            }
             metadata.lore(lore);
             item.setItemMeta(metadata);
             inventory.setItem(button.slot(), item);
@@ -150,6 +157,24 @@ public final class ShardingbaseMenuManager {
             this.open(player, DefaultMenus.CONFIRMATION);
             return;
         }
+        if (DefaultMenus.PLAYER_DATA.equals(menuId)) {
+            final Set<PlayerDataCategory> categories = categories(buttonId);
+            if (!categories.isEmpty()) {
+                this.runtime.togglePlayerDataCategories(categories).whenComplete((selected, failure) ->
+                    this.serverExecutor.execute(() -> {
+                        if (!player.isOnline()) {
+                            return;
+                        }
+                        if (failure != null) {
+                            player.sendMessage(Component.text("Unable to update player synchronization: "
+                                + safeMessage(failure)));
+                        }
+                        this.open(player, DefaultMenus.PLAYER_DATA);
+                    })
+                );
+                return;
+            }
+        }
         if (DefaultMenus.CONFIRMATION.equals(menuId) && "confirm".equals(buttonId)) {
             player.closeInventory();
             player.sendMessage(Component.text(this.runtime.featureState() == FeatureState.ENABLED
@@ -160,5 +185,31 @@ public final class ShardingbaseMenuManager {
         player.sendMessage(Component.text(this.runtime.featureState() == FeatureState.ENABLED
             ? "This operation is ready for its proxy transaction."
             : "Distributed features are unavailable: " + this.runtime.statusDetail()));
+    }
+
+    private static Set<PlayerDataCategory> categories(final String buttonId) {
+        return switch (buttonId) {
+            case "inventory" -> Set.of(PlayerDataCategory.INVENTORY);
+            case "armor" -> Set.of(PlayerDataCategory.ARMOR);
+            case "offhand" -> Set.of(PlayerDataCategory.OFFHAND);
+            case "selected-slot" -> Set.of(PlayerDataCategory.SELECTED_SLOT);
+            case "ender-chest" -> Set.of(PlayerDataCategory.ENDER_CHEST);
+            case "experience" -> Set.of(PlayerDataCategory.EXPERIENCE);
+            case "health" -> Set.of(PlayerDataCategory.HEALTH);
+            case "hunger" -> Set.of(PlayerDataCategory.FOOD);
+            case "potion-effects" -> Set.of(PlayerDataCategory.POTION_EFFECTS);
+            case "game-mode" -> Set.of(PlayerDataCategory.GAME_MODE, PlayerDataCategory.ABILITIES);
+            case "advancements" -> Set.of(PlayerDataCategory.ADVANCEMENTS);
+            case "statistics" -> Set.of(PlayerDataCategory.STATISTICS);
+            default -> Set.of();
+        };
+    }
+
+    private static String safeMessage(final Throwable failure) {
+        Throwable current = failure;
+        while (current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current.getMessage() == null ? current.getClass().getSimpleName() : current.getMessage();
     }
 }

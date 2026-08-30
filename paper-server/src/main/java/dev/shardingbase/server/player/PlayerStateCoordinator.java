@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.bukkit.entity.Player;
@@ -44,6 +45,9 @@ public final class PlayerStateCoordinator implements AutoCloseable {
     private final ConcurrentHashMap<UUID, PlayerHandoffCodec.Capture> managedCaptures = new ConcurrentHashMap<>();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean polling = new AtomicBoolean();
+    private final AtomicReference<Set<PlayerDataCategory>> selectedCategories = new AtomicReference<>(
+        Set.copyOf(ALL_CATEGORIES)
+    );
     private volatile Executor serverExecutor;
     private volatile Thread pollThread;
 
@@ -72,6 +76,52 @@ public final class PlayerStateCoordinator implements AutoCloseable {
                 .daemon(true)
                 .name("Shardingbase Backend Control Poll")
                 .start(this::pollLoop);
+            this.refreshSettings();
+        }
+    }
+
+    /** Returns an immutable snapshot of the currently known authority selection. */
+    public Set<PlayerDataCategory> categories() {
+        return this.selectedCategories.get();
+    }
+
+    /** Toggles one or more categories atomically at the Velocity authority. */
+    public CompletionStage<Set<PlayerDataCategory>> toggle(final Set<PlayerDataCategory> categories) {
+        try {
+            return CompletableFuture.supplyAsync(() -> {
+                try {
+                    final EnumSet<PlayerDataCategory> candidate = EnumSet.copyOf(this.handoff.settings());
+                    final boolean allEnabled = candidate.containsAll(categories);
+                    if (allEnabled) {
+                        if (candidate.size() == categories.size()) {
+                            throw new IOException("At least one portable player category must remain enabled");
+                        }
+                        candidate.removeAll(categories);
+                    } else {
+                        candidate.addAll(categories);
+                    }
+                    final Set<PlayerDataCategory> stored = Set.copyOf(this.handoff.settings(candidate));
+                    this.selectedCategories.set(stored);
+                    return stored;
+                } catch (IOException exception) {
+                    throw new CompletionException(exception);
+                }
+            }, this.transport);
+        } catch (final RejectedExecutionException exception) {
+            return CompletableFuture.failedFuture(new IOException("Player transport queue is full", exception));
+        }
+    }
+
+    private void refreshSettings() {
+        try {
+            this.transport.execute(() -> {
+                try {
+                    this.selectedCategories.set(Set.copyOf(this.handoff.settings()));
+                } catch (IOException exception) {
+                    this.logger.log(Level.FINE, "Player synchronization settings are not available yet", exception);
+                }
+            });
+        } catch (final RejectedExecutionException _) {
         }
     }
 
@@ -113,7 +163,7 @@ public final class PlayerStateCoordinator implements AutoCloseable {
     public void captureAndReplicate(final Player player, final String peerBackendId) {
         final PlayerHandoffCodec.Capture managed = this.managedCaptures.remove(player.getUniqueId());
         final String targetBackendId = managed == null ? peerBackendId : managed.targetBackendId();
-        final Set<PlayerDataCategory> categories = managed == null ? ALL_CATEGORIES : managed.categories();
+        final Set<PlayerDataCategory> categories = managed == null ? this.selectedCategories.get() : managed.categories();
         if (targetBackendId == null || targetBackendId.isBlank()) {
             return;
         }

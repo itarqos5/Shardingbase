@@ -6,6 +6,7 @@ import dev.shardingbase.protocol.MessageType;
 import dev.shardingbase.protocol.NodeAuthenticationCodec;
 import dev.shardingbase.protocol.PlayerHandoffCodec;
 import dev.shardingbase.protocol.PlayerSnapshot;
+import dev.shardingbase.protocol.PlayerSettingsCodec;
 import dev.shardingbase.protocol.ProtocolChannel;
 import dev.shardingbase.protocol.ProtocolFrame;
 import dev.shardingbase.protocol.ReplayWindow;
@@ -201,6 +202,20 @@ final class ControlServer implements AutoCloseable {
                 MessageType.PLAYER_SNAPSHOT_FETCH_RESPONSE,
                 this.fetchPlayerSnapshot(source.nodeId(), frame)
             ));
+            case PLAYER_SETTINGS_GET -> source.send(response(
+                frame,
+                MessageType.PLAYER_SETTINGS_RESPONSE,
+                PlayerSettingsCodec.encode(this.playerStateStore.categories())
+            ));
+            case PLAYER_SETTINGS_SET -> {
+                final var categories = PlayerSettingsCodec.decode(frame.payload());
+                this.playerStateStore.categories(categories);
+                source.send(response(
+                    frame,
+                    MessageType.PLAYER_SETTINGS_RESPONSE,
+                    PlayerSettingsCodec.encode(categories)
+                ));
+            }
             default -> source.send(error(frame, "unexpected message for Velocity authority"));
         }
     }

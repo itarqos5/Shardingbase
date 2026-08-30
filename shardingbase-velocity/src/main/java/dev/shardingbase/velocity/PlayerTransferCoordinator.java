@@ -18,7 +18,6 @@ import org.slf4j.Logger;
 /** Pauses managed switches until post-quit state is durably staged for the target. */
 final class PlayerTransferCoordinator {
     private static final Duration STAGE_TIMEOUT = Duration.ofSeconds(10);
-    private static final EnumSet<PlayerDataCategory> ALL_CATEGORIES = EnumSet.allOf(PlayerDataCategory.class);
 
     private final BackendRegistry registry;
     private final PlayerStateStore playerStateStore;
@@ -79,6 +78,7 @@ final class PlayerTransferCoordinator {
                 .backendForName(targetServer.getServerInfo().getName())
                 .orElseThrow(() -> new IOException("target backend is not registered"));
             final long revision = this.playerStateStore.reserveRevision(player.getUniqueId());
+            final var categories = this.playerStateStore.categories();
             final PendingTransfer transfer = new PendingTransfer(sourceServer, targetServer, target.serverId(), revision);
             if (this.pending.putIfAbsent(player.getUniqueId(), transfer) != null) {
                 throw new IOException("a player handoff is already active");
@@ -87,7 +87,7 @@ final class PlayerTransferCoordinator {
                 player.getUniqueId(),
                 target.serverId(),
                 revision,
-                ALL_CATEGORIES
+                categories
             ));
         } catch (final IOException exception) {
             this.pending.remove(player.getUniqueId());
