@@ -72,7 +72,7 @@ final class PlayerTransferCoordinator {
             .orElseThrow(() -> new IOException("target is missing from Velocity servers"));
         final long revision = this.playerStateStore.reserveRevision(player.getUniqueId());
         final PendingTransfer transfer = new PendingTransfer(
-            currentConnection.getServer(), targetServer, target.serverId(), revision, request.destination()
+            currentConnection.getServer(), targetServer, target.serverId(), revision
         );
         if (this.pending.putIfAbsent(player.getUniqueId(), transfer) != null) {
             throw new IOException("a player handoff is already active");
@@ -151,7 +151,7 @@ final class PlayerTransferCoordinator {
             final long revision = this.playerStateStore.reserveRevision(player.getUniqueId());
             final var categories = this.playerStateStore.categories();
             final PendingTransfer transfer = new PendingTransfer(
-                sourceServer, targetServer, target.serverId(), revision, null
+                sourceServer, targetServer, target.serverId(), revision
             );
             if (this.pending.putIfAbsent(player.getUniqueId(), transfer) != null) {
                 throw new IOException("a player handoff is already active");
@@ -199,8 +199,7 @@ final class PlayerTransferCoordinator {
         RegisteredServer source,
         RegisteredServer target,
         String targetBackendId,
-        long revision,
-        PlayerHandoffCodec.TransferDestination destination
+        long revision
     ) {
     }
 }

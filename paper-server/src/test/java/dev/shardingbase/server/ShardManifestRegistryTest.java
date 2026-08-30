@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -36,6 +37,17 @@ class ShardManifestRegistryTest {
         assertThrows(ShardingbaseConfigurationException.class, () -> ShardManifestRegistry.load(directory));
     }
 
+    @Test
+    void exposesExactRuntimeBoundary(@TempDir final Path directory) throws Exception {
+        writeManifest(directory.resolve("world"), "minecraft:overworld", "X", "-2", "POSITIVE");
+        final ShardManifestRegistry.Boundary boundary = ShardManifestRegistry.load(directory)
+            .boundary("minecraft:overworld")
+            .orElseThrow();
+        assertEquals(-32L, boundary.cutBlock());
+        assertFalse(boundary.owns(-33, 0));
+        assertTrue(boundary.owns(-32, 0));
+    }
+
     private static WorldPosition position(final String world, final int x, final int z) {
         return new WorldPosition(world, x, 64, z);
     }
@@ -51,6 +63,7 @@ class ShardManifestRegistryTest {
         Files.writeString(world.resolve(ShardManifestRegistry.FILE_NAME), """
             format-version=1
             world-key=%s
+            world-id=080d7407-075f-4d7a-888b-e4c30d12fbc4
             transaction-id=8ef6e718-b766-465f-9df2-7827f2577682
             axis=%s
             cut-chunk=%s

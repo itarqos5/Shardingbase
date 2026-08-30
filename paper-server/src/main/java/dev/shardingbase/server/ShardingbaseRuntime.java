@@ -59,6 +59,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     private final AtomicLong generation = new AtomicLong();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final PlayerStateCoordinator playerStateCoordinator;
+    private final ShardBoundaryCoordinator shardBoundaryCoordinator;
     private final RemoteOperationCoordinator remoteOperationCoordinator;
     private final RemoteCommandCoordinator remoteCommandCoordinator;
     private final WorldMapCoordinator worldMapCoordinator;
@@ -108,9 +109,19 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         this.logger = logger;
         this.executor = executor;
         final ShardingbaseConfiguration configuration = this.configurationLoader.load();
+        this.shardManifests = new AtomicReference<>(ShardManifestRegistry.load(serverDirectory));
         this.playerStateCoordinator = new PlayerStateCoordinator(
             configuration.identity().serverId(),
             serverDirectory,
+            logger
+        );
+        this.shardBoundaryCoordinator = new ShardBoundaryCoordinator(
+            configuration.identity().serverId(),
+            this.shardManifests::get,
+            this::featureState,
+            this::peerStatus,
+            this.playerStateCoordinator::frozen,
+            this::lockShardOwnership,
             logger
         );
         this.remoteOperationCoordinator = new RemoteOperationCoordinator(configuration.identity().serverId(), logger);
@@ -119,7 +130,6 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         this.worldTransactionCoordinator =
             new WorldTransactionCoordinator(configuration.identity().serverId(), logger);
         this.remoteOperations = new RoutedRemoteOperations();
-        this.shardManifests = new AtomicReference<>(ShardManifestRegistry.load(serverDirectory));
         this.snapshot = new AtomicReference<>(new Snapshot(
             configuration.identity(),
             FeatureState.PENDING,
@@ -197,6 +207,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     /** Attaches the server-thread executor used for managed player handoff requests. */
     public void playerExecutor(final java.util.concurrent.Executor playerExecutor) {
         this.playerStateCoordinator.serverExecutor(playerExecutor);
+        this.shardBoundaryCoordinator.start(playerExecutor);
         this.remoteOperationCoordinator.start(playerExecutor, this::ownership);
         this.remoteCommandCoordinator.start(playerExecutor);
         this.worldMapCoordinator.start(playerExecutor);
@@ -231,11 +242,12 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
             || this.featureState() == FeatureState.ENABLED && peer.available()) {
             this.playerStateCoordinator.captureAndReplicate(player, peer.serverId());
         }
+        this.shardBoundaryCoordinator.disconnected(player.getUniqueId());
     }
 
     /** Returns whether source-side interaction is frozen for a managed handoff. */
     public boolean isPlayerStateFrozen(final UUID playerId) {
-        return this.playerStateCoordinator.frozen(playerId);
+        return this.playerStateCoordinator.frozen(playerId) || this.shardBoundaryCoordinator.frozen(playerId);
     }
 
     /** Returns the last successfully loaded network-wide player category selection. */
@@ -266,6 +278,24 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
             new PeerStatus(false, "", "", "peer is not validated")
         ));
         this.executor.execute(() -> this.validate(identity, currentGeneration, 0));
+    }
+
+    private void lockShardOwnership(final String detail) {
+        final Snapshot previous = this.snapshot.get();
+        if (previous.featureState() == FeatureState.MAINTENANCE && previous.detail().contains(detail)) {
+            return;
+        }
+        this.generation.incrementAndGet();
+        final ScheduledFuture<?> previousRetry = this.retryTask;
+        if (previousRetry != null) {
+            previousRetry.cancel(false);
+        }
+        this.snapshot.set(new Snapshot(
+            previous.identity(),
+            FeatureState.MAINTENANCE,
+            "shard ownership maintenance lock: " + detail,
+            new PeerStatus(false, "", "", detail)
+        ));
     }
 
     private void validate(final ServerIdentity identity, final long expectedGeneration, final int attempt) {
@@ -334,6 +364,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
             pendingRetry.cancel(true);
         }
         this.executor.shutdownNow();
+        this.shardBoundaryCoordinator.close();
         this.playerStateCoordinator.close();
         this.remoteOperationCoordinator.close();
         this.remoteCommandCoordinator.close();

@@ -60,6 +60,13 @@ class PlayerHandoffClientTest {
                     responsePayload = PlayerSettingsCodec.encode(PlayerSettingsCodec.decode(payload));
                     responseType = MessageType.PLAYER_SETTINGS_RESPONSE;
                 }
+                case PLAYER_BOUNDARY_REQUEST -> {
+                    final var boundary = PlayerHandoffCodec.decodeBoundaryRequest(payload);
+                    responsePayload = PlayerHandoffCodec.encodeBoundaryResponse(
+                        new PlayerHandoffCodec.BoundaryResponse(boundary.playerId(), true, "capture requested")
+                    );
+                    responseType = MessageType.PLAYER_BOUNDARY_RESPONSE;
+                }
                 default -> throw new AssertionError(messageType);
             }
             return new ProtocolFrame(
@@ -87,5 +94,12 @@ class PlayerHandoffClientTest {
         assertEquals(7, client.fetch(playerId).orElseThrow().snapshot().revision());
         assertEquals(categories, client.settings());
         assertEquals(categories, client.settings(categories));
+        assertTrue(client.boundary(
+            "backend-b",
+            playerId,
+            new PlayerHandoffCodec.TransferDestination(
+                "minecraft:overworld", UUID.randomUUID(), 1.5, 64.0, 2.5, 0.0F, 0.0F
+            )
+        ).accepted());
     }
 }

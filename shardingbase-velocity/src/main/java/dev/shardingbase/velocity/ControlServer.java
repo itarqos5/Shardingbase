@@ -408,7 +408,13 @@ final class ControlServer implements AutoCloseable {
                 request.playerId(), false, "boundary source is not owned by this node"
             ));
         }
-        return PlayerHandoffCodec.encodeBoundaryResponse(this.boundaryTransferHandler.begin(request));
+        try {
+            return PlayerHandoffCodec.encodeBoundaryResponse(this.boundaryTransferHandler.begin(request));
+        } catch (final IOException exception) {
+            return PlayerHandoffCodec.encodeBoundaryResponse(new PlayerHandoffCodec.BoundaryResponse(
+                request.playerId(), false, exception.getMessage() == null ? "boundary transfer failed" : exception.getMessage()
+            ));
+        }
     }
 
     private void completeTransaction(final String nodeId, final ProtocolFrame frame) throws IOException {

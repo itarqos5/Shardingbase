@@ -97,6 +97,31 @@ public final class PlayerHandoffClient {
         return Optional.ofNullable(PlayerHandoffCodec.decodeFetchResponse(response.payload()).stage());
     }
 
+    /** Requests an authenticated managed transfer after a player crosses a shard boundary. */
+    public PlayerHandoffCodec.BoundaryResponse boundary(
+        final String targetBackendId,
+        final UUID playerId,
+        final PlayerHandoffCodec.TransferDestination destination
+    ) throws IOException {
+        final ProtocolFrame response = this.node.request(
+            this.backendId,
+            ProtocolChannel.PLAYER_SYNC,
+            MessageType.PLAYER_BOUNDARY_REQUEST,
+            "velocity",
+            PlayerHandoffCodec.encodeBoundaryRequest(new PlayerHandoffCodec.BoundaryRequest(
+                playerId, this.backendId, targetBackendId, destination
+            ))
+        );
+        requireType(response, MessageType.PLAYER_BOUNDARY_RESPONSE);
+        final PlayerHandoffCodec.BoundaryResponse boundary = PlayerHandoffCodec.decodeBoundaryResponse(
+            response.payload()
+        );
+        if (!playerId.equals(boundary.playerId())) {
+            throw new IOException("Velocity returned a boundary response for another player");
+        }
+        return boundary;
+    }
+
     /** Loads the network-authoritative portable category selection. */
     public Set<PlayerDataCategory> settings() throws IOException {
         final ProtocolFrame response = this.node.request(

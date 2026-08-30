@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -74,6 +75,19 @@ final class ShardManifestRegistry {
         return negative == (manifest.ownedSide() == Side.NEGATIVE) ? Ownership.LOCAL : Ownership.REMOTE;
     }
 
+    Optional<Boundary> boundary(final String worldKey) {
+        final Manifest manifest = this.manifests.get(worldKey);
+        return manifest == null ? Optional.empty() : Optional.of(new Boundary(
+            manifest.worldKey(),
+            manifest.worldId(),
+            manifest.transactionId(),
+            manifest.axis(),
+            manifest.cutChunk(),
+            manifest.ownedSide(),
+            manifest.peerId()
+        ));
+    }
+
     private static Manifest read(final Path path) throws ShardingbaseConfigurationException {
         final Properties properties = new Properties();
         try (InputStream input = Files.newInputStream(path)) {
@@ -109,12 +123,12 @@ final class ShardManifestRegistry {
         return value;
     }
 
-    private enum Axis {
+    enum Axis {
         X,
         Z
     }
 
-    private enum Side {
+    enum Side {
         NEGATIVE,
         POSITIVE
     }
@@ -128,5 +142,25 @@ final class ShardManifestRegistry {
         Side ownedSide,
         String peerId
     ) {
+    }
+
+    record Boundary(
+        String worldKey,
+        UUID worldId,
+        UUID transactionId,
+        Axis axis,
+        int cutChunk,
+        Side ownedSide,
+        String peerId
+    ) {
+        long cutBlock() {
+            return (long) this.cutChunk * 16L;
+        }
+
+        boolean owns(final int blockX, final int blockZ) {
+            final int chunk = Math.floorDiv(this.axis == Axis.X ? blockX : blockZ, 16);
+            final boolean negative = chunk < this.cutChunk;
+            return negative == (this.ownedSide == Side.NEGATIVE);
+        }
     }
 }

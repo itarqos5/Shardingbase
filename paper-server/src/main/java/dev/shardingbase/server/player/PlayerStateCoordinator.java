@@ -28,6 +28,8 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.bukkit.entity.Player;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.World;
 import net.kyori.adventure.text.Component;
 
 /** Coordinates non-blocking transport and server-thread capture/application of portable player state. */
@@ -154,7 +156,115 @@ public final class PlayerStateCoordinator implements AutoCloseable {
             return;
         }
         this.adapter.apply(player, snapshot);
+        if (stage.destination() != null) {
+            this.applyDestination(player, stage.destination());
+        }
         this.revisions.markApplied(snapshot.playerId(), snapshot.revision());
+    }
+
+    private void applyDestination(
+        final Player player,
+        final PlayerHandoffCodec.TransferDestination destination
+    ) throws IOException {
+        final World world = Bukkit.getWorld(destination.worldId());
+        if (world == null || !world.getKey().toString().equals(destination.worldKey())) {
+            throw new IOException("Transfer destination world identity is not loaded on this shard");
+        }
+        final Location requested = new Location(
+            world,
+            destination.x(),
+            destination.y(),
+            destination.z(),
+            destination.yaw(),
+            destination.pitch()
+        );
+        final Location safe = safeDestination(requested, 4);
+        if (safe == null) {
+            throw new IOException("No safe transfer destination exists within four blocks of the crossing");
+        }
+        if (!samePosition(requested, safe)) {
+            this.logger.info("Adjusted Shardingbase transfer destination for " + player.getUniqueId()
+                + " from " + format(requested) + " to " + format(safe));
+        }
+        if (!player.teleport(safe)) {
+            throw new IOException("The target server rejected the safe transfer destination");
+        }
+    }
+
+    static Location safeDestination(final Location requested, final int radius) {
+        if (requested.getWorld() == null || radius < 0) {
+            throw new IllegalArgumentException("A world and non-negative search radius are required");
+        }
+        final World world = requested.getWorld();
+        final int requestedX = requested.getBlockX();
+        final int requestedY = requested.getBlockY();
+        final int requestedZ = requested.getBlockZ();
+        for (int distance = 0; distance <= radius; distance++) {
+            for (int dx = -distance; dx <= distance; dx++) {
+                for (int dz = -distance; dz <= distance; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != distance) {
+                        continue;
+                    }
+                    for (int vertical = 0; vertical <= radius; vertical++) {
+                        final int positiveY = requestedY + vertical;
+                        final Location positive = candidate(requested, world, requestedX + dx, positiveY, requestedZ + dz);
+                        if (safe(positive)) {
+                            return positive;
+                        }
+                        if (vertical > 0) {
+                            final Location negative = candidate(
+                                requested, world, requestedX + dx, requestedY - vertical, requestedZ + dz
+                            );
+                            if (safe(negative)) {
+                                return negative;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Location candidate(
+        final Location requested,
+        final World world,
+        final int blockX,
+        final int blockY,
+        final int blockZ
+    ) {
+        final boolean exactColumn = blockX == requested.getBlockX() && blockZ == requested.getBlockZ();
+        final boolean exactHeight = blockY == requested.getBlockY();
+        return new Location(
+            world,
+            exactColumn ? requested.getX() : blockX + 0.5,
+            exactHeight ? requested.getY() : blockY,
+            exactColumn ? requested.getZ() : blockZ + 0.5,
+            requested.getYaw(),
+            requested.getPitch()
+        );
+    }
+
+    private static boolean safe(final Location location) {
+        final World world = location.getWorld();
+        if (world == null || location.getBlockY() <= world.getMinHeight()
+            || location.getBlockY() + 1 >= world.getMaxHeight()) {
+            return false;
+        }
+        return world.getBlockAt(location).isPassable()
+            && world.getBlockAt(location.getBlockX(), location.getBlockY() + 1, location.getBlockZ()).isPassable()
+            && world.getBlockAt(location.getBlockX(), location.getBlockY() - 1, location.getBlockZ()).isSolid();
+    }
+
+    private static boolean samePosition(final Location first, final Location second) {
+        return first.getWorld() == second.getWorld()
+            && Double.compare(first.getX(), second.getX()) == 0
+            && Double.compare(first.getY(), second.getY()) == 0
+            && Double.compare(first.getZ(), second.getZ()) == 0;
+    }
+
+    private static String format(final Location location) {
+        return location.getWorld().getKey() + " " + location.getX() + "," + location.getY() + "," + location.getZ();
     }
 
     /**
