@@ -7,6 +7,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.SecureRandom;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -37,7 +39,10 @@ record VelocityConfiguration(
     String keyStorePassword,
     Path databasePath,
     Map<String, String> nodeCredentials,
-    Set<String> remoteCommandAllowlist
+    Set<String> remoteCommandAllowlist,
+    String webBindAddress,
+    int webPort,
+    String webPublicUrl
 ) {
     VelocityConfiguration {
         nodeCredentials = Map.copyOf(nodeCredentials);
@@ -74,9 +79,19 @@ record VelocityConfiguration(
         for (final Map.Entry<?, ?> entry : credentialsNode.entrySet()) {
             credentials.put(string(entry.getKey(), "node id"), string(entry.getValue(), "node credential"));
         }
+        final Map<?, ?> web = optionalMapping(root.get("web"), "web");
+        final String webBind = web.isEmpty() ? "0.0.0.0" : string(web.get("bind"), "web.bind");
+        final int webPort = web.isEmpty() ? 8080 : integer(web.get("port"), "web.port");
+        if (webPort < 1 || webPort > 65_535) {
+            throw new IOException("web.port is outside the valid port range");
+        }
+        final String webPublicUrl = web.isEmpty()
+            ? "http://127.0.0.1:" + webPort
+            : publicUrl(web.get("public-url"));
         return new VelocityConfiguration(
             bind, port, keyStore, password, database, credentials,
-            stringSet(root.get("remote-command-allowlist"), "remote-command-allowlist")
+            stringSet(root.get("remote-command-allowlist"), "remote-command-allowlist"),
+            webBind, webPort, webPublicUrl
         );
     }
 
@@ -88,7 +103,10 @@ record VelocityConfiguration(
             token(24),
             directory.resolve("shardingbase.db"),
             Map.of("node-a", token(32), "node-b", token(32)),
-            Set.of()
+            Set.of(),
+            "0.0.0.0",
+            8080,
+            "http://127.0.0.1:8080"
         );
     }
 
@@ -105,6 +123,11 @@ record VelocityConfiguration(
         root.put("database", directory.relativize(configuration.databasePath()).toString().replace('\\', '/'));
         root.put("node-credentials", configuration.nodeCredentials());
         root.put("remote-command-allowlist", configuration.remoteCommandAllowlist().stream().sorted().toList());
+        root.put("web", Map.of(
+            "bind", configuration.webBindAddress(),
+            "port", configuration.webPort(),
+            "public-url", configuration.webPublicUrl()
+        ));
         final DumperOptions options = new DumperOptions();
         options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK);
         final String yaml = new Yaml(new Representer(options), options).dump(root);
@@ -144,6 +167,10 @@ record VelocityConfiguration(
         throw new IOException(field + " must be a mapping");
     }
 
+    private static Map<?, ?> optionalMapping(final Object value, final String field) throws IOException {
+        return value == null ? Map.of() : mapping(value, field);
+    }
+
     private static String string(final Object value, final String field) throws IOException {
         if (value instanceof final String string && !string.isBlank()) {
             return string;
@@ -174,5 +201,19 @@ record VelocityConfiguration(
             result.add(label);
         }
         return Set.copyOf(result);
+    }
+
+    private static String publicUrl(final Object value) throws IOException {
+        final String configured = string(value, "web.public-url");
+        try {
+            final URI uri = new URI(configured);
+            if (!("http".equals(uri.getScheme()) || "https".equals(uri.getScheme())) || uri.getHost() == null
+                || uri.getRawQuery() != null || uri.getRawFragment() != null) {
+                throw new IOException("web.public-url must be an absolute HTTP(S) URL without query or fragment");
+            }
+            return configured.endsWith("/") ? configured.substring(0, configured.length() - 1) : configured;
+        } catch (final URISyntaxException exception) {
+            throw new IOException("web.public-url is invalid", exception);
+        }
     }
 }

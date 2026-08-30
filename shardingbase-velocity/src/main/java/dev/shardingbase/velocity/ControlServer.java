@@ -3,6 +3,7 @@ package dev.shardingbase.velocity;
 import com.velocitypowered.api.proxy.ProxyServer;
 import dev.shardingbase.protocol.FrameCodec;
 import dev.shardingbase.protocol.MessageType;
+import dev.shardingbase.protocol.MapPlannerCodec;
 import dev.shardingbase.protocol.NodeAuthenticationCodec;
 import dev.shardingbase.protocol.PlayerHandoffCodec;
 import dev.shardingbase.protocol.PlayerSnapshot;
@@ -46,6 +47,8 @@ final class ControlServer implements AutoCloseable {
     private final Map<String, String> credentials;
     private final BackendRegistry registry;
     private final PlayerStateStore playerStateStore;
+    private final WorldPlannerStore worldPlannerStore;
+    private final String webPublicUrl;
     private final ConcurrentHashMap<String, ClientSession> sessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<String>> commandCatalogs = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, CompletableFuture<RemoteCommandCodec.Response>> pendingCommands =
@@ -61,13 +64,16 @@ final class ControlServer implements AutoCloseable {
         final VelocityConfiguration configuration,
         final TlsMaterial tlsMaterial,
         final BackendRegistry registry,
-        final PlayerStateStore playerStateStore
+        final PlayerStateStore playerStateStore,
+        final WorldPlannerStore worldPlannerStore
     ) throws IOException {
         this.proxy = proxy;
         this.logger = logger;
         this.credentials = configuration.nodeCredentials();
         this.registry = registry;
         this.playerStateStore = playerStateStore;
+        this.worldPlannerStore = worldPlannerStore;
+        this.webPublicUrl = configuration.webPublicUrl();
         this.serverSocket = (SSLServerSocket) tlsMaterial.context().getServerSocketFactory().createServerSocket();
         this.serverSocket.setEnabledProtocols(new String[] {"TLSv1.3"});
         this.serverSocket.bind(new InetSocketAddress(
@@ -242,7 +248,42 @@ final class ControlServer implements AutoCloseable {
                 }
                 source.send(response(frame, MessageType.COMMAND_CATALOG_ACK, new byte[0]));
             }
+            case MAP_SESSION_CREATE -> {
+                final MapPlannerCodec.Create create = MapPlannerCodec.decodeCreate(frame.payload());
+                if (!this.registry.nodeIdForTarget(create.backendId()).filter(source.nodeId()::equals).isPresent()) {
+                    source.send(response(frame, MessageType.MAP_SESSION_CREATED, MapPlannerCodec.encodeCreated(
+                        new MapPlannerCodec.Created(create.sessionId(), false, "map backend is not owned by this node")
+                    )));
+                    break;
+                }
+                this.worldPlannerStore.create(create);
+                source.send(response(frame, MessageType.MAP_SESSION_CREATED, MapPlannerCodec.encodeCreated(
+                    new MapPlannerCodec.Created(create.sessionId(), true, "map upload accepted")
+                )));
+            }
+            case MAP_TILE_PUT -> {
+                final MapPlannerCodec.Tile tile = MapPlannerCodec.decodeTile(frame.payload());
+                this.requireMapOwner(source.nodeId(), tile.sessionId());
+                this.worldPlannerStore.putTile(tile);
+                source.send(response(frame, MessageType.MAP_TILE_ACK, MapPlannerCodec.encodeSessionId(tile.sessionId())));
+            }
+            case MAP_SESSION_COMPLETE -> {
+                final UUID sessionId = MapPlannerCodec.decodeSessionId(frame.payload());
+                this.requireMapOwner(source.nodeId(), sessionId);
+                final String token = this.worldPlannerStore.complete(sessionId);
+                source.send(response(frame, MessageType.MAP_PLANNER_LINK, MapPlannerCodec.encodeLink(
+                    new MapPlannerCodec.Link(sessionId, this.webPublicUrl + "/planner/" + token)
+                )));
+            }
             default -> source.send(error(frame, "unexpected message for Velocity authority"));
+        }
+    }
+
+    private void requireMapOwner(final String nodeId, final UUID sessionId) throws IOException {
+        final String backendId = this.worldPlannerStore.backendId(sessionId)
+            .orElseThrow(() -> new IOException("map session does not exist"));
+        if (!this.registry.nodeIdForTarget(backendId).filter(nodeId::equals).isPresent()) {
+            throw new IOException("map session is not owned by this node");
         }
     }
 

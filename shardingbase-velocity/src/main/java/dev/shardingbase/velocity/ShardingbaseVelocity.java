@@ -39,6 +39,7 @@ public final class ShardingbaseVelocity {
     private volatile PlayerTransferCoordinator playerTransfers;
     private volatile BackendRegistry backendRegistry;
     private volatile Set<String> remoteCommandAllowlist = Set.of();
+    private volatile PlannerWebServer plannerWebServer;
 
     @Inject
     public ShardingbaseVelocity(
@@ -65,6 +66,10 @@ public final class ShardingbaseVelocity {
             } catch (final IOException exception) {
                 this.logger.warn("Unable to close the Shardingbase control listener cleanly", exception);
             }
+        }
+        final PlannerWebServer planner = this.plannerWebServer;
+        if (planner != null) {
+            planner.close();
         }
     }
 
@@ -167,8 +172,10 @@ public final class ShardingbaseVelocity {
             final TlsMaterial tlsMaterial = TlsMaterial.loadOrCreate(configuration);
             final BackendRegistry registry = new BackendRegistry(configuration.databasePath());
             final PlayerStateStore playerStateStore = new PlayerStateStore(configuration.databasePath());
+            final WorldPlannerStore worldPlannerStore = new WorldPlannerStore(configuration.databasePath());
+            this.plannerWebServer = new PlannerWebServer(configuration, worldPlannerStore, registry, this.logger);
             this.controlServer = new ControlServer(
-                this.proxy, this.logger, configuration, tlsMaterial, registry, playerStateStore
+                this.proxy, this.logger, configuration, tlsMaterial, registry, playerStateStore, worldPlannerStore
             );
             this.backendRegistry = registry;
             this.remoteCommandAllowlist = configuration.remoteCommandAllowlist();

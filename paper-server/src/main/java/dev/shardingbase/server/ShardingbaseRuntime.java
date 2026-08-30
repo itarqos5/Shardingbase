@@ -10,12 +10,14 @@ import dev.shardingbase.api.RemoteResult;
 import dev.shardingbase.api.ServerIdentity;
 import dev.shardingbase.api.ShardingbaseService;
 import dev.shardingbase.api.WorldPosition;
+import dev.shardingbase.protocol.MapPlannerCodec;
 import dev.shardingbase.protocol.PlayerDataCategory;
 import dev.shardingbase.protocol.PlayerHandoffCodec;
 import dev.shardingbase.protocol.RemoteOperationCodec;
 import dev.shardingbase.server.config.ShardingbaseConfiguration;
 import dev.shardingbase.server.config.ShardingbaseConfigurationException;
 import dev.shardingbase.server.config.ShardingbaseConfigurationLoader;
+import dev.shardingbase.server.map.WorldMapCoordinator;
 import dev.shardingbase.server.player.PlayerStateCoordinator;
 import dev.shardingbase.server.remote.RemoteCommandCoordinator;
 import dev.shardingbase.server.remote.RemoteOperationCoordinator;
@@ -58,6 +60,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     private final PlayerStateCoordinator playerStateCoordinator;
     private final RemoteOperationCoordinator remoteOperationCoordinator;
     private final RemoteCommandCoordinator remoteCommandCoordinator;
+    private final WorldMapCoordinator worldMapCoordinator;
     private volatile @Nullable ScheduledFuture<?> retryTask;
     private volatile Runnable menuReloader = () -> {
     };
@@ -110,6 +113,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         );
         this.remoteOperationCoordinator = new RemoteOperationCoordinator(configuration.identity().serverId(), logger);
         this.remoteCommandCoordinator = new RemoteCommandCoordinator(configuration.identity().serverId(), logger);
+        this.worldMapCoordinator = new WorldMapCoordinator(configuration.identity().serverId(), logger);
         this.remoteOperations = new RoutedRemoteOperations();
         this.shardManifests = new AtomicReference<>(ShardManifestRegistry.load(serverDirectory));
         this.snapshot = new AtomicReference<>(new Snapshot(
@@ -191,6 +195,15 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         this.playerStateCoordinator.serverExecutor(playerExecutor);
         this.remoteOperationCoordinator.start(playerExecutor, this::ownership);
         this.remoteCommandCoordinator.start(playerExecutor);
+        this.worldMapCoordinator.start(playerExecutor);
+    }
+
+    /** Renders every generated chunk in a loaded world and publishes a one-use planner link. */
+    public CompletionStage<MapPlannerCodec.Link> createWorldPlanner(final org.bukkit.World world) {
+        if (this.featureState() != FeatureState.ENABLED) {
+            return CompletableFuture.failedFuture(new IllegalStateException(this.statusDetail()));
+        }
+        return this.worldMapCoordinator.create(world);
     }
 
     /** Starts an asynchronous lookup for state staged for a joining player. */
@@ -319,6 +332,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         this.playerStateCoordinator.close();
         this.remoteOperationCoordinator.close();
         this.remoteCommandCoordinator.close();
+        this.worldMapCoordinator.close();
         final Snapshot previous = this.snapshot.get();
         this.snapshot.set(new Snapshot(
             previous.identity(),

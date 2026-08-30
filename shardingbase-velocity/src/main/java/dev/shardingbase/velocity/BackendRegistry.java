@@ -11,6 +11,8 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Optional;
+import java.util.ArrayList;
+import java.util.List;
 
 /** Transactional SQLite authority for the exactly-two-backend prototype. */
 final class BackendRegistry {
@@ -150,6 +152,28 @@ final class BackendRegistry {
             }
         } catch (final SQLException exception) {
             throw new IOException("SQLite peer backend lookup failed", exception);
+        }
+    }
+
+    synchronized List<BackendTarget> backends() throws IOException {
+        try (
+            Connection connection = this.connection();
+            PreparedStatement statement = connection.prepareStatement(
+                "SELECT server_id, server_name, node_id FROM backends ORDER BY server_name"
+            );
+            ResultSet result = statement.executeQuery()
+        ) {
+            final List<BackendTarget> backends = new ArrayList<>();
+            while (result.next()) {
+                backends.add(new BackendTarget(
+                    result.getString("server_id"),
+                    result.getString("server_name"),
+                    result.getString("node_id")
+                ));
+            }
+            return List.copyOf(backends);
+        } catch (final SQLException exception) {
+            throw new IOException("SQLite backend list lookup failed", exception);
         }
     }
 

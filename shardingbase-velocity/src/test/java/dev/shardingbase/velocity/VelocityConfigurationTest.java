@@ -17,6 +17,7 @@ class VelocityConfigurationTest {
         assertEquals(2, configuration.nodeCredentials().size());
         assertEquals(8443, configuration.controlPort());
         assertTrue(configuration.remoteCommandAllowlist().isEmpty());
+        assertEquals(8080, configuration.webPort());
         assertTrue(Files.isRegularFile(directory.resolve("config.yml")));
         assertTrue(configuration.keyStorePath().startsWith(directory));
         assertTrue(configuration.databasePath().startsWith(directory));

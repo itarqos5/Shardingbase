@@ -182,6 +182,24 @@ public final class ShardingbaseMenuManager {
                 : "Player synchronization is unavailable: " + this.runtime.statusDetail()));
             return;
         }
+        if (DefaultMenus.WORLD_SHARDING.equals(menuId) && "open-planner".equals(buttonId)) {
+            player.closeInventory();
+            player.sendMessage(Component.text("Scanning generated chunks and rendering the Shardingbase map…"));
+            this.runtime.createWorldPlanner(player.getWorld()).whenComplete((link, failure) ->
+                this.serverExecutor.execute(() -> {
+                    if (!player.isOnline()) {
+                        return;
+                    }
+                    if (failure != null) {
+                        player.sendMessage(Component.text("Unable to create world planner: " + safeMessage(failure)));
+                    } else {
+                        player.sendMessage(Component.text("Open the one-use Shardingbase world planner")
+                            .clickEvent(net.kyori.adventure.text.event.ClickEvent.openUrl(link.url())));
+                    }
+                })
+            );
+            return;
+        }
         player.sendMessage(Component.text(this.runtime.featureState() == FeatureState.ENABLED
             ? "This operation is ready for its proxy transaction."
             : "Distributed features are unavailable: " + this.runtime.statusDetail()));

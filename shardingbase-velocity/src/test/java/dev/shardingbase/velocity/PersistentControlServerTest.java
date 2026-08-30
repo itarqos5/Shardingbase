@@ -49,20 +49,25 @@ class PersistentControlServerTest {
             "test-password",
             directory.resolve("shardingbase.db"),
             Map.of("node-a", "credential-a", "node-b", "credential-b"),
-            Set.of("home")
+            Set.of("home"),
+            "127.0.0.1",
+            8080,
+            "http://127.0.0.1:8080"
         );
         final TlsMaterial tls = TlsMaterial.loadOrCreate(configuration);
         final BackendRegistry registry = new BackendRegistry(configuration.databasePath());
         registry.register("node-a", validationRequest("credential-a", "backend-id-a", "backend-a"));
         registry.register("node-b", validationRequest("credential-b", "backend-id-b", "backend-b"));
         final PlayerStateStore playerStateStore = new PlayerStateStore(configuration.databasePath());
+        final WorldPlannerStore worldPlannerStore = new WorldPlannerStore(configuration.databasePath());
         try (ControlServer server = new ControlServer(
             proxyWithBackend(),
             NOPLogger.NOP_LOGGER,
             configuration,
             tls,
             registry,
-            playerStateStore
+            playerStateStore,
+            worldPlannerStore
         ); SSLSocket socket = connect(port)) {
             final UUID authenticationId = UUID.randomUUID();
             FrameCodec.write(socket.getOutputStream(), frame(
