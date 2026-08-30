@@ -1,8 +1,8 @@
 package dev.shardingbase.server;
 
-import dev.shardingbase.api.FeatureState;
 import dev.shardingbase.api.BlockSnapshot;
 import dev.shardingbase.api.EntitySpawn;
+import dev.shardingbase.api.FeatureState;
 import dev.shardingbase.api.Ownership;
 import dev.shardingbase.api.PeerStatus;
 import dev.shardingbase.api.RemoteOperations;
@@ -10,21 +10,24 @@ import dev.shardingbase.api.RemoteResult;
 import dev.shardingbase.api.ServerIdentity;
 import dev.shardingbase.api.ShardingbaseService;
 import dev.shardingbase.api.WorldPosition;
+import dev.shardingbase.protocol.PlayerDataCategory;
+import dev.shardingbase.protocol.PlayerHandoffCodec;
+import dev.shardingbase.protocol.RemoteOperationCodec;
 import dev.shardingbase.server.config.ShardingbaseConfiguration;
 import dev.shardingbase.server.config.ShardingbaseConfigurationException;
 import dev.shardingbase.server.config.ShardingbaseConfigurationLoader;
+import dev.shardingbase.server.player.PlayerStateCoordinator;
+import dev.shardingbase.server.remote.RemoteCommandCoordinator;
+import dev.shardingbase.server.remote.RemoteOperationCoordinator;
 import dev.shardingbase.server.validation.BackendValidator;
 import dev.shardingbase.server.validation.LocalNodeValidator;
 import dev.shardingbase.server.validation.ValidationResult;
-import dev.shardingbase.server.player.PlayerStateCoordinator;
-import dev.shardingbase.protocol.PlayerHandoffCodec;
-import dev.shardingbase.protocol.PlayerDataCategory;
-import dev.shardingbase.protocol.RemoteOperationCodec;
-import dev.shardingbase.server.remote.RemoteOperationCoordinator;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.Objects;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ScheduledExecutorService;
@@ -32,8 +35,6 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
-import java.util.UUID;
-import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -56,6 +57,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     private final AtomicBoolean closed = new AtomicBoolean();
     private final PlayerStateCoordinator playerStateCoordinator;
     private final RemoteOperationCoordinator remoteOperationCoordinator;
+    private final RemoteCommandCoordinator remoteCommandCoordinator;
     private volatile @Nullable ScheduledFuture<?> retryTask;
     private volatile Runnable menuReloader = () -> {
     };
@@ -107,6 +109,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
             logger
         );
         this.remoteOperationCoordinator = new RemoteOperationCoordinator(configuration.identity().serverId(), logger);
+        this.remoteCommandCoordinator = new RemoteCommandCoordinator(configuration.identity().serverId(), logger);
         this.remoteOperations = new RoutedRemoteOperations();
         this.shardManifests = new AtomicReference<>(ShardManifestRegistry.load(serverDirectory));
         this.snapshot = new AtomicReference<>(new Snapshot(
@@ -187,6 +190,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     public void playerExecutor(final java.util.concurrent.Executor playerExecutor) {
         this.playerStateCoordinator.serverExecutor(playerExecutor);
         this.remoteOperationCoordinator.start(playerExecutor, this::ownership);
+        this.remoteCommandCoordinator.start(playerExecutor);
     }
 
     /** Starts an asynchronous lookup for state staged for a joining player. */
@@ -314,6 +318,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         this.executor.shutdownNow();
         this.playerStateCoordinator.close();
         this.remoteOperationCoordinator.close();
+        this.remoteCommandCoordinator.close();
         final Snapshot previous = this.snapshot.get();
         this.snapshot.set(new Snapshot(
             previous.identity(),

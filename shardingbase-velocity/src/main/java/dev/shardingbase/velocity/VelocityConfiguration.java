@@ -9,7 +9,11 @@ import java.nio.file.StandardCopyOption;
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import org.yaml.snakeyaml.DumperOptions;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
@@ -32,10 +36,12 @@ record VelocityConfiguration(
     Path keyStorePath,
     String keyStorePassword,
     Path databasePath,
-    Map<String, String> nodeCredentials
+    Map<String, String> nodeCredentials,
+    Set<String> remoteCommandAllowlist
 ) {
     VelocityConfiguration {
         nodeCredentials = Map.copyOf(nodeCredentials);
+        remoteCommandAllowlist = Set.copyOf(remoteCommandAllowlist);
     }
 
     static VelocityConfiguration load(final Path dataDirectory) throws IOException {
@@ -68,7 +74,10 @@ record VelocityConfiguration(
         for (final Map.Entry<?, ?> entry : credentialsNode.entrySet()) {
             credentials.put(string(entry.getKey(), "node id"), string(entry.getValue(), "node credential"));
         }
-        return new VelocityConfiguration(bind, port, keyStore, password, database, credentials);
+        return new VelocityConfiguration(
+            bind, port, keyStore, password, database, credentials,
+            stringSet(root.get("remote-command-allowlist"), "remote-command-allowlist")
+        );
     }
 
     private static VelocityConfiguration defaults(final Path directory) {
@@ -78,7 +87,8 @@ record VelocityConfiguration(
             directory.resolve("tls.p12"),
             token(24),
             directory.resolve("shardingbase.db"),
-            Map.of("node-a", token(32), "node-b", token(32))
+            Map.of("node-a", token(32), "node-b", token(32)),
+            Set.of()
         );
     }
 
@@ -94,6 +104,7 @@ record VelocityConfiguration(
         root.put("control", control);
         root.put("database", directory.relativize(configuration.databasePath()).toString().replace('\\', '/'));
         root.put("node-credentials", configuration.nodeCredentials());
+        root.put("remote-command-allowlist", configuration.remoteCommandAllowlist().stream().sorted().toList());
         final DumperOptions options = new DumperOptions();
         options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK);
         final String yaml = new Yaml(new Representer(options), options).dump(root);
@@ -145,5 +156,23 @@ record VelocityConfiguration(
             return number.intValue();
         }
         throw new IOException(field + " must be an integer");
+    }
+
+    private static Set<String> stringSet(final Object value, final String field) throws IOException {
+        if (value == null) {
+            return Set.of();
+        }
+        if (!(value instanceof final List<?> values)) {
+            throw new IOException(field + " must be a list");
+        }
+        final Set<String> result = new LinkedHashSet<>();
+        for (final Object entry : values) {
+            final String label = string(entry, field + " entry").toLowerCase(Locale.ROOT);
+            if (!label.matches("[a-z0-9_.:-]+")) {
+                throw new IOException(field + " contains an invalid command label: " + label);
+            }
+            result.add(label);
+        }
+        return Set.copyOf(result);
     }
 }

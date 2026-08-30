@@ -136,6 +136,23 @@ final class BackendRegistry {
         }
     }
 
+    synchronized Optional<BackendTarget> peerForName(final String serverName) throws IOException {
+        try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement(
+            "SELECT server_id, server_name, node_id FROM backends WHERE server_name <> ? ORDER BY server_id LIMIT 1"
+        )) {
+            statement.setString(1, serverName);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? Optional.of(new BackendTarget(
+                    result.getString("server_id"),
+                    result.getString("server_name"),
+                    result.getString("node_id")
+                )) : Optional.empty();
+            }
+        } catch (final SQLException exception) {
+            throw new IOException("SQLite peer backend lookup failed", exception);
+        }
+    }
+
     private Connection connection() throws SQLException {
         final Connection connection = DriverManager.getConnection(this.jdbcUrl);
         try (PreparedStatement statement = connection.prepareStatement("PRAGMA busy_timeout = 5000")) {

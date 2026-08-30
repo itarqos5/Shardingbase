@@ -11,6 +11,7 @@ import dev.shardingbase.protocol.PlayerSnapshot;
 import dev.shardingbase.protocol.PlayerSettingsCodec;
 import dev.shardingbase.protocol.ProtocolChannel;
 import dev.shardingbase.protocol.ProtocolFrame;
+import dev.shardingbase.protocol.RemoteCommandCodec;
 import dev.shardingbase.protocol.ShardingbaseProtocol;
 import dev.shardingbase.protocol.ValidationPayloadCodec;
 import java.lang.reflect.Proxy;
@@ -22,7 +23,9 @@ import java.security.cert.X509Certificate;
 import java.util.EnumSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManager;
@@ -45,7 +48,8 @@ class PersistentControlServerTest {
             directory.resolve("tls.p12"),
             "test-password",
             directory.resolve("shardingbase.db"),
-            Map.of("node-a", "credential-a", "node-b", "credential-b")
+            Map.of("node-a", "credential-a", "node-b", "credential-b"),
+            Set.of("home")
         );
         final TlsMaterial tls = TlsMaterial.loadOrCreate(configuration);
         final BackendRegistry registry = new BackendRegistry(configuration.databasePath());
@@ -102,6 +106,35 @@ class PersistentControlServerTest {
             final ProtocolFrame settings = FrameCodec.read(socket.getInputStream());
             assertEquals(MessageType.PLAYER_SETTINGS_RESPONSE, settings.messageType());
             assertEquals(selectedCategories, PlayerSettingsCodec.decode(settings.payload()));
+
+            final UUID catalogId = UUID.randomUUID();
+            FrameCodec.write(socket.getOutputStream(), frame(
+                ProtocolChannel.COMMAND,
+                MessageType.COMMAND_CATALOG,
+                catalogId,
+                RemoteCommandCodec.encodeCatalog(new RemoteCommandCodec.Catalog("backend-id-a", Set.of("home")))
+            ));
+            assertEquals(MessageType.COMMAND_CATALOG_ACK, FrameCodec.read(socket.getInputStream()).messageType());
+            assertEquals(Set.of("home"), server.commandCatalog("backend-id-a"));
+
+            final var commandFuture = server.command(
+                registry.backendForName("backend-a").orElseThrow(),
+                RemoteCommandCodec.Operation.EXECUTE,
+                "home spawn"
+            );
+            final ProtocolFrame commandPush = FrameCodec.read(socket.getInputStream());
+            final RemoteCommandCodec.Request commandRequest = RemoteCommandCodec.decodeRequest(commandPush.payload());
+            final RemoteCommandCodec.Response commandResponse = new RemoteCommandCodec.Response(
+                commandRequest.requestId(), RemoteCommandCodec.Outcome.SUCCESS, "executed", java.util.List.of("Done")
+            );
+            FrameCodec.write(socket.getOutputStream(), frame(
+                ProtocolChannel.COMMAND,
+                MessageType.COMMAND_RESPONSE,
+                UUID.randomUUID(),
+                RemoteCommandCodec.encodeResponse(commandResponse)
+            ));
+            assertEquals(MessageType.COMMAND_CATALOG_ACK, FrameCodec.read(socket.getInputStream()).messageType());
+            assertEquals(commandResponse, commandFuture.get(3, TimeUnit.SECONDS));
 
             final UUID validationId = UUID.randomUUID();
             FrameCodec.write(socket.getOutputStream(), frame(
@@ -188,6 +221,23 @@ class PersistentControlServerTest {
 
     private static ProtocolFrame frame(final MessageType type, final UUID correlationId, final byte[] payload) {
         return frame("node-a", type, correlationId, payload);
+    }
+
+    private static ProtocolFrame frame(
+        final ProtocolChannel channel,
+        final MessageType type,
+        final UUID correlationId,
+        final byte[] payload
+    ) {
+        return new ProtocolFrame(
+            ShardingbaseProtocol.VERSION,
+            channel,
+            type,
+            correlationId,
+            "node-a",
+            "velocity",
+            payload
+        );
     }
 
     private static ProtocolFrame frame(

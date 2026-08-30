@@ -10,6 +10,7 @@ import dev.shardingbase.protocol.PlayerSettingsCodec;
 import dev.shardingbase.protocol.ProtocolChannel;
 import dev.shardingbase.protocol.ProtocolFrame;
 import dev.shardingbase.protocol.ReplayWindow;
+import dev.shardingbase.protocol.RemoteCommandCodec;
 import dev.shardingbase.protocol.ShardingbaseProtocol;
 import dev.shardingbase.protocol.ValidationPayloadCodec;
 import dev.shardingbase.protocol.ValidationPayloadCodec.ValidationRequest;
@@ -22,9 +23,12 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -35,6 +39,7 @@ import org.slf4j.Logger;
 final class ControlServer implements AutoCloseable {
     private static final int CLIENT_TIMEOUT_MILLIS = 15_000;
     private static final int SESSION_QUEUE_CAPACITY = 256;
+    private static final Duration COMMAND_TIMEOUT = Duration.ofSeconds(3);
 
     private final ProxyServer proxy;
     private final Logger logger;
@@ -42,6 +47,9 @@ final class ControlServer implements AutoCloseable {
     private final BackendRegistry registry;
     private final PlayerStateStore playerStateStore;
     private final ConcurrentHashMap<String, ClientSession> sessions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Set<String>> commandCatalogs = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, CompletableFuture<RemoteCommandCodec.Response>> pendingCommands =
+        new ConcurrentHashMap<>();
     private final SSLServerSocket serverSocket;
     private final ThreadPoolExecutor clients;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -216,8 +224,68 @@ final class ControlServer implements AutoCloseable {
                     PlayerSettingsCodec.encode(categories)
                 ));
             }
+            case COMMAND_CATALOG -> {
+                final RemoteCommandCodec.Catalog catalog = RemoteCommandCodec.decodeCatalog(frame.payload());
+                if (!this.registry.nodeIdForTarget(catalog.backendId()).filter(source.nodeId()::equals).isPresent()) {
+                    source.send(error(frame, "command catalog backend is not owned by this node"));
+                    break;
+                }
+                this.commandCatalogs.put(catalog.backendId(), catalog.labels());
+                source.send(response(frame, MessageType.COMMAND_CATALOG_ACK, new byte[0]));
+            }
+            case COMMAND_RESPONSE -> {
+                final RemoteCommandCodec.Response commandResponse = RemoteCommandCodec.decodeResponse(frame.payload());
+                final CompletableFuture<RemoteCommandCodec.Response> pending =
+                    this.pendingCommands.remove(commandResponse.requestId());
+                if (pending != null) {
+                    pending.complete(commandResponse);
+                }
+                source.send(response(frame, MessageType.COMMAND_CATALOG_ACK, new byte[0]));
+            }
             default -> source.send(error(frame, "unexpected message for Velocity authority"));
         }
+    }
+
+    Set<String> commandCatalog(final String backendId) {
+        return this.commandCatalogs.getOrDefault(backendId, Set.of());
+    }
+
+    CompletableFuture<RemoteCommandCodec.Response> command(
+        final BackendRegistry.BackendTarget target,
+        final RemoteCommandCodec.Operation operation,
+        final String commandLine
+    ) {
+        final UUID requestId = UUID.randomUUID();
+        final CompletableFuture<RemoteCommandCodec.Response> result = new CompletableFuture<>();
+        this.pendingCommands.put(requestId, result);
+        try {
+            final ClientSession session = this.sessions.get(target.nodeId());
+            if (session == null) {
+                throw new IOException("target node is unavailable");
+            }
+            session.send(new ProtocolFrame(
+                ShardingbaseProtocol.VERSION,
+                ProtocolChannel.COMMAND,
+                MessageType.COMMAND_REQUEST,
+                requestId,
+                "velocity",
+                target.nodeId(),
+                RemoteCommandCodec.encodeRequest(new RemoteCommandCodec.Request(
+                    requestId, "velocity", operation, commandLine
+                ))
+            ));
+        } catch (final IOException exception) {
+            this.pendingCommands.remove(requestId);
+            result.completeExceptionally(exception);
+            return result;
+        }
+        CompletableFuture.delayedExecutor(COMMAND_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS).execute(() -> {
+            final CompletableFuture<RemoteCommandCodec.Response> pending = this.pendingCommands.remove(requestId);
+            if (pending != null) {
+                pending.completeExceptionally(new TimeoutException("Remote command timed out after three seconds"));
+            }
+        });
+        return result;
     }
 
     void sendPlayerCapture(final BackendRegistry.BackendTarget source, final PlayerHandoffCodec.Capture capture)
@@ -344,6 +412,10 @@ final class ControlServer implements AutoCloseable {
         this.sessions.values().forEach(ClientSession::close);
         this.sessions.clear();
         this.clients.shutdownNow();
+        this.pendingCommands.forEach((id, future) -> future.completeExceptionally(
+            new IOException("Velocity controller is shutting down")
+        ));
+        this.pendingCommands.clear();
         this.acceptThread.interrupt();
     }
 
