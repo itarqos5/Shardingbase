@@ -1,0 +1,42 @@
+package dev.shardingbase.velocity;
+
+import java.nio.file.Path;
+import java.util.UUID;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+class PlayerStateStoreTest {
+    @Test
+    void assignsMonotonicRevisionsAndPersistsThem(@TempDir final Path directory) throws Exception {
+        final Path database = directory.resolve("shardingbase.db");
+        final PlayerStateStore store = new PlayerStateStore(database);
+        final UUID playerId = UUID.randomUUID();
+
+        assertEquals(1, store.storeNext(playerId, "backend-a", new byte[] {1}).revision());
+        assertEquals(2, store.storeNext(playerId, "backend-b", new byte[] {2}).revision());
+
+        final PlayerStateStore.StoredSnapshot reloaded = new PlayerStateStore(database).load(playerId).orElseThrow();
+        assertEquals(2, reloaded.revision());
+        assertEquals("backend-b", reloaded.sourceBackendId());
+        assertArrayEquals(new byte[] {2}, reloaded.snapshot());
+    }
+
+    @Test
+    void ignoresStaleAndDuplicateRetriesAndRejectsRevisionConflicts(@TempDir final Path directory) throws Exception {
+        final PlayerStateStore store = new PlayerStateStore(directory.resolve("shardingbase.db"));
+        final UUID playerId = UUID.randomUUID();
+
+        assertEquals(PlayerStateStore.StageResult.STORED,
+            store.acceptRevision(playerId, 5, "backend-a", new byte[] {5}));
+        assertEquals(PlayerStateStore.StageResult.DUPLICATE,
+            store.acceptRevision(playerId, 5, "backend-a", new byte[] {5}));
+        assertEquals(PlayerStateStore.StageResult.CONFLICT,
+            store.acceptRevision(playerId, 5, "backend-a", new byte[] {9}));
+        assertEquals(PlayerStateStore.StageResult.STALE,
+            store.acceptRevision(playerId, 4, "backend-a", new byte[] {4}));
+        assertEquals(5, store.load(playerId).orElseThrow().revision());
+    }
+}
