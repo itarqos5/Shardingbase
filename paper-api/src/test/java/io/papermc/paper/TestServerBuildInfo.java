@@ -20,7 +20,7 @@ public class TestServerBuildInfo implements ServerBuildInfo {
 
     @Override
     public String brandName() {
-        throw new UnsupportedOperationException();
+        return "Paper";
     }
 
     @Override

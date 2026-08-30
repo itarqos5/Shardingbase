@@ -123,12 +123,20 @@ public final class Bukkit {
     @NotNull
     public static String getVersionMessage() {
         final io.papermc.paper.ServerBuildInfo version = io.papermc.paper.ServerBuildInfo.buildInfo();
-        return "This server is running " + getName() + " version " + version.asString(io.papermc.paper.ServerBuildInfo.StringRepresentation.VERSION_FULL) + " (Implementing API version " + getBukkitVersion() + ")";
+        // Shardingbase - getName() intentionally reports Paper for legacy plugin compatibility.
+        // Keep the operator-facing version message branded with the fork's real identity.
+        return "This server is running " + version.brandName() + " version " + version.asString(io.papermc.paper.ServerBuildInfo.StringRepresentation.VERSION_FULL) + " (Implementing API version " + getBukkitVersion() + ")";
         // Paper end
     }
 
     /**
      * Gets the name of this server implementation.
+     * <p>
+     * Shardingbase reports {@code Paper} here for compatibility with legacy
+     * plugins. Use {@link io.papermc.paper.ServerBuildInfo#brandName()} for the
+     * server's display brand and
+     * {@link io.papermc.paper.ServerBuildInfo#isBrandCompatible(net.kyori.adventure.key.Key)}
+     * for capability checks.
      *
      * @return name of this server implementation
      * @see io.papermc.paper.ServerBuildInfo#brandName()
