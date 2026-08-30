@@ -14,10 +14,12 @@ import dev.shardingbase.protocol.ProtocolFrame;
 import dev.shardingbase.protocol.RemoteCommandCodec;
 import dev.shardingbase.protocol.ShardingbaseProtocol;
 import dev.shardingbase.protocol.ValidationPayloadCodec;
+import dev.shardingbase.protocol.WorldTransactionCodec;
 import java.lang.reflect.Proxy;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.util.EnumSet;
@@ -35,6 +37,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.helpers.NOPLogger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PersistentControlServerTest {
@@ -49,6 +52,7 @@ class PersistentControlServerTest {
             "test-password",
             directory.resolve("shardingbase.db"),
             Map.of("node-a", "credential-a", "node-b", "credential-b"),
+            java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[32]),
             Set.of("home"),
             "127.0.0.1",
             8080,
@@ -140,6 +144,65 @@ class PersistentControlServerTest {
             ));
             assertEquals(MessageType.COMMAND_CATALOG_ACK, FrameCodec.read(socket.getInputStream()).messageType());
             assertEquals(commandResponse, commandFuture.get(3, TimeUnit.SECONDS));
+
+            final WorldTransactionCodec.Manifest transactionManifest = new WorldTransactionCodec.Manifest(
+                UUID.randomUUID(),
+                "node-a",
+                "node-b",
+                "backend-id-a",
+                "backend-id-b",
+                "minecraft:overworld",
+                "world",
+                UUID.randomUUID(),
+                42L,
+                4671,
+                WorldTransactionCodec.Axis.X,
+                0,
+                "node-a",
+                "node-b",
+                1_024L
+            );
+            final byte[] transactionKey =
+                java.util.Base64.getUrlDecoder().decode(configuration.transactionSigningKey());
+            final WorldTransactionCodec.Request transactionRequest = new WorldTransactionCodec.Request(
+                WorldTransactionCodec.Operation.STATUS,
+                WorldTransactionCodec.sign(transactionManifest, transactionKey)
+            );
+            final var transactionFuture = server.transaction(
+                "node-a",
+                transactionRequest,
+                Duration.ofSeconds(3)
+            );
+            final ProtocolFrame transactionPush = FrameCodec.read(socket.getInputStream());
+            assertEquals(MessageType.WORLD_TRANSACTION_REQUEST, transactionPush.messageType());
+            final WorldTransactionCodec.Request decodedTransaction =
+                WorldTransactionCodec.decodeRequest(transactionPush.payload());
+            assertTrue(WorldTransactionCodec.verify(decodedTransaction.signedManifest(), transactionKey));
+            final WorldTransactionCodec.Response transactionResponse = new WorldTransactionCodec.Response(
+                transactionManifest.transactionId(),
+                WorldTransactionCodec.Operation.STATUS,
+                WorldTransactionCodec.Outcome.SUCCESS,
+                "node is ready",
+                true,
+                1234L,
+                -1,
+                1_000_000L,
+                WorldTransactionCodec.digest(transactionManifest)
+            );
+            FrameCodec.write(socket.getOutputStream(), new ProtocolFrame(
+                ShardingbaseProtocol.VERSION,
+                ProtocolChannel.WORLD_TRANSACTION,
+                MessageType.WORLD_TRANSACTION_RESPONSE,
+                transactionPush.correlationId(),
+                "node-a",
+                "velocity",
+                WorldTransactionCodec.encodeResponse(transactionResponse)
+            ));
+            final WorldTransactionCodec.Response completedTransaction =
+                transactionFuture.get(3, TimeUnit.SECONDS);
+            assertEquals(transactionResponse.transactionId(), completedTransaction.transactionId());
+            assertEquals(transactionResponse.outcome(), completedTransaction.outcome());
+            assertArrayEquals(transactionResponse.manifestDigest(), completedTransaction.manifestDigest());
 
             final UUID validationId = UUID.randomUUID();
             FrameCodec.write(socket.getOutputStream(), frame(

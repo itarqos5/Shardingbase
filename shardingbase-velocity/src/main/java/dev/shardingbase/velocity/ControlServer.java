@@ -16,6 +16,7 @@ import dev.shardingbase.protocol.ShardingbaseProtocol;
 import dev.shardingbase.protocol.ValidationPayloadCodec;
 import dev.shardingbase.protocol.ValidationPayloadCodec.ValidationRequest;
 import dev.shardingbase.protocol.ValidationPayloadCodec.ValidationResponse;
+import dev.shardingbase.protocol.WorldTransactionCodec;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -26,6 +27,7 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.Arrays;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
@@ -53,6 +55,7 @@ final class ControlServer implements AutoCloseable {
     private final ConcurrentHashMap<String, Set<String>> commandCatalogs = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, CompletableFuture<RemoteCommandCodec.Response>> pendingCommands =
         new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, PendingTransaction> pendingTransactions = new ConcurrentHashMap<>();
     private final SSLServerSocket serverSocket;
     private final ThreadPoolExecutor clients;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -275,6 +278,7 @@ final class ControlServer implements AutoCloseable {
                     new MapPlannerCodec.Link(sessionId, this.webPublicUrl + "/planner/" + token)
                 )));
             }
+            case WORLD_TRANSACTION_RESPONSE -> this.completeTransaction(source.nodeId(), frame);
             default -> source.send(error(frame, "unexpected message for Velocity authority"));
         }
     }
@@ -327,6 +331,80 @@ final class ControlServer implements AutoCloseable {
             }
         });
         return result;
+    }
+
+    CompletableFuture<WorldTransactionCodec.Response> transaction(
+        final String nodeId,
+        final WorldTransactionCodec.Request request,
+        final Duration timeout
+    ) {
+        final CompletableFuture<WorldTransactionCodec.Response> result = new CompletableFuture<>();
+        if (timeout == null || timeout.isZero() || timeout.isNegative() || timeout.compareTo(Duration.ofMinutes(30)) > 0) {
+            result.completeExceptionally(new IllegalArgumentException(
+                "World transaction timeout must be between one nanosecond and 30 minutes"
+            ));
+            return result;
+        }
+        final UUID correlationId = UUID.randomUUID();
+        try {
+            final ClientSession session = this.sessions.get(nodeId);
+            if (session == null) {
+                throw new IOException("target node is unavailable");
+            }
+            final var manifest = request.signedManifest().manifest();
+            final PendingTransaction pending = new PendingTransaction(
+                nodeId,
+                manifest.transactionId(),
+                request.operation(),
+                WorldTransactionCodec.digest(manifest),
+                result
+            );
+            this.pendingTransactions.put(correlationId, pending);
+            session.send(new ProtocolFrame(
+                ShardingbaseProtocol.VERSION,
+                ProtocolChannel.WORLD_TRANSACTION,
+                MessageType.WORLD_TRANSACTION_REQUEST,
+                correlationId,
+                "velocity",
+                nodeId,
+                WorldTransactionCodec.encodeRequest(request)
+            ));
+        } catch (final IOException exception) {
+            this.pendingTransactions.remove(correlationId);
+            result.completeExceptionally(exception);
+            return result;
+        }
+        CompletableFuture.delayedExecutor(timeout.toMillis(), TimeUnit.MILLISECONDS).execute(() -> {
+            final PendingTransaction pending = this.pendingTransactions.remove(correlationId);
+            if (pending != null) {
+                pending.future().completeExceptionally(new TimeoutException(
+                    "World transaction node request timed out after " + timeout
+                ));
+            }
+        });
+        return result;
+    }
+
+    boolean nodeConnected(final String nodeId) {
+        final ClientSession session = this.sessions.get(nodeId);
+        return session != null && !session.closed();
+    }
+
+    private void completeTransaction(final String nodeId, final ProtocolFrame frame) throws IOException {
+        final PendingTransaction pending = this.pendingTransactions.remove(frame.correlationId());
+        if (pending == null) {
+            throw new IOException("received an unsolicited world transaction response");
+        }
+        final WorldTransactionCodec.Response response = WorldTransactionCodec.decodeResponse(frame.payload());
+        if (!pending.nodeId().equals(nodeId)
+            || !pending.transactionId().equals(response.transactionId())
+            || pending.operation() != response.operation()
+            || !Arrays.equals(pending.manifestDigest(), response.manifestDigest())) {
+            final IOException failure = new IOException("node returned a mismatched world transaction response");
+            pending.future().completeExceptionally(failure);
+            throw failure;
+        }
+        pending.future().complete(response);
     }
 
     void sendPlayerCapture(final BackendRegistry.BackendTarget source, final PlayerHandoffCodec.Capture capture)
@@ -457,7 +535,28 @@ final class ControlServer implements AutoCloseable {
             new IOException("Velocity controller is shutting down")
         ));
         this.pendingCommands.clear();
+        this.pendingTransactions.forEach((id, pending) -> pending.future().completeExceptionally(
+            new IOException("Velocity controller is shutting down")
+        ));
+        this.pendingTransactions.clear();
         this.acceptThread.interrupt();
+    }
+
+    private record PendingTransaction(
+        String nodeId,
+        UUID transactionId,
+        WorldTransactionCodec.Operation operation,
+        byte[] manifestDigest,
+        CompletableFuture<WorldTransactionCodec.Response> future
+    ) {
+        private PendingTransaction {
+            manifestDigest = manifestDigest.clone();
+        }
+
+        @Override
+        public byte[] manifestDigest() {
+            return this.manifestDigest.clone();
+        }
     }
 
     private static final class ClientSession {

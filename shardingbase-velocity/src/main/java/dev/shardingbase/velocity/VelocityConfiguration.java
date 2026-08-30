@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.time.Instant;
 import org.yaml.snakeyaml.DumperOptions;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
@@ -39,6 +40,7 @@ record VelocityConfiguration(
     String keyStorePassword,
     Path databasePath,
     Map<String, String> nodeCredentials,
+    String transactionSigningKey,
     Set<String> remoteCommandAllowlist,
     String webBindAddress,
     int webPort,
@@ -79,6 +81,10 @@ record VelocityConfiguration(
         for (final Map.Entry<?, ?> entry : credentialsNode.entrySet()) {
             credentials.put(string(entry.getKey(), "node id"), string(entry.getValue(), "node credential"));
         }
+        final boolean missingTransactionKey = !control.containsKey("transaction-signing-key");
+        final String transactionSigningKey = missingTransactionKey
+            ? token(32)
+            : signingKey(control.get("transaction-signing-key"));
         final Map<?, ?> web = optionalMapping(root.get("web"), "web");
         final String webBind = web.isEmpty() ? "0.0.0.0" : string(web.get("bind"), "web.bind");
         final int webPort = web.isEmpty() ? 8080 : integer(web.get("port"), "web.port");
@@ -88,11 +94,17 @@ record VelocityConfiguration(
         final String webPublicUrl = web.isEmpty()
             ? "http://127.0.0.1:" + webPort
             : publicUrl(web.get("public-url"));
-        return new VelocityConfiguration(
-            bind, port, keyStore, password, database, credentials,
+        final VelocityConfiguration configuration = new VelocityConfiguration(
+            bind, port, keyStore, password, database, credentials, transactionSigningKey,
             stringSet(root.get("remote-command-allowlist"), "remote-command-allowlist"),
             webBind, webPort, webPublicUrl
         );
+        if (missingTransactionKey) {
+            final Path backup = path.resolveSibling(path.getFileName() + ".bak." + Instant.now().toEpochMilli());
+            Files.copy(path, backup);
+            write(path, configuration, normalizedDirectory, true);
+        }
+        return configuration;
     }
 
     private static VelocityConfiguration defaults(final Path directory) {
@@ -103,6 +115,7 @@ record VelocityConfiguration(
             token(24),
             directory.resolve("shardingbase.db"),
             Map.of("node-a", token(32), "node-b", token(32)),
+            token(32),
             Set.of(),
             "0.0.0.0",
             8080,
@@ -112,6 +125,15 @@ record VelocityConfiguration(
 
     private static void write(final Path path, final VelocityConfiguration configuration, final Path directory)
         throws IOException {
+        write(path, configuration, directory, false);
+    }
+
+    private static void write(
+        final Path path,
+        final VelocityConfiguration configuration,
+        final Path directory,
+        final boolean replace
+    ) throws IOException {
         Files.createDirectories(directory);
         final Map<String, Object> root = new LinkedHashMap<>();
         final Map<String, Object> control = new LinkedHashMap<>();
@@ -119,6 +141,7 @@ record VelocityConfiguration(
         control.put("port", configuration.controlPort());
         control.put("keystore", directory.relativize(configuration.keyStorePath()).toString().replace('\\', '/'));
         control.put("keystore-password", configuration.keyStorePassword());
+        control.put("transaction-signing-key", configuration.transactionSigningKey());
         root.put("control", control);
         root.put("database", directory.relativize(configuration.databasePath()).toString().replace('\\', '/'));
         root.put("node-credentials", configuration.nodeCredentials());
@@ -135,7 +158,11 @@ record VelocityConfiguration(
         try {
             temporary = Files.createTempFile(directory, ".shardingbase-velocity-", ".tmp");
             Files.writeString(temporary, yaml, StandardCharsets.UTF_8);
-            Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE);
+            if (replace) {
+                Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } else {
+                Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE);
+            }
             temporary = null;
         } catch (final AtomicMoveNotSupportedException exception) {
             throw new IOException("Atomic configuration creation is not supported", exception);
@@ -158,6 +185,18 @@ record VelocityConfiguration(
         final byte[] random = new byte[bytes];
         new SecureRandom().nextBytes(random);
         return Base64.getUrlEncoder().withoutPadding().encodeToString(random);
+    }
+
+    private static String signingKey(final Object value) throws IOException {
+        final String encoded = string(value, "control.transaction-signing-key");
+        try {
+            if (Base64.getUrlDecoder().decode(encoded).length < 32) {
+                throw new IOException("control.transaction-signing-key must decode to at least 32 bytes");
+            }
+            return encoded;
+        } catch (final IllegalArgumentException exception) {
+            throw new IOException("control.transaction-signing-key must be URL-safe base64", exception);
+        }
     }
 
     private static Map<?, ?> mapping(final Object value, final String field) throws IOException {
