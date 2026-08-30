@@ -1,6 +1,7 @@
 package dev.shardingbase.node;
 
 import dev.shardingbase.node.world.OfflineWorldTransactionPreparer;
+import dev.shardingbase.node.world.OfflineTargetTransactionPreparer;
 import dev.shardingbase.node.world.ShardAxis;
 import dev.shardingbase.protocol.MessageType;
 import dev.shardingbase.protocol.ProtocolChannel;
@@ -56,6 +57,8 @@ final class NodeWorldTransactionController implements AutoCloseable {
         new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, byte[]> authorized = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, OfflineWorldTransactionPreparer.PreparedTransaction> prepared =
+        new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, OfflineTargetTransactionPreparer.PreparedTarget> preparedTargets =
         new ConcurrentHashMap<>();
     private final AtomicReference<UUID> activeTransaction = new AtomicReference<>();
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -145,6 +148,7 @@ final class NodeWorldTransactionController implements AutoCloseable {
                 case STOP_BACKEND -> this.stop(request);
                 case PREPARE_SOURCE -> this.prepareSource(request);
                 case RESTART_BACKEND -> this.restart(request);
+                case PREPARE_TARGET -> this.prepareTarget(request);
             };
             this.proxy.respond(frame, MessageType.WORLD_TRANSACTION_RESPONSE,
                 WorldTransactionCodec.encodeResponse(response));
@@ -271,6 +275,49 @@ final class NodeWorldTransactionController implements AutoCloseable {
         }
         this.backend.restart();
         return this.status(request, Outcome.SUCCESS, "backend restart launched");
+    }
+
+    private Response prepareTarget(final Request request) throws IOException {
+        this.requireAuthorization(request);
+        final Manifest manifest = request.signedManifest().manifest();
+        if (!this.nodeId.equals(manifest.targetNodeId())) {
+            return this.status(request, Outcome.REJECTED, "only the declared target node may prepare the target");
+        }
+        if (this.backend.status().running()) {
+            return this.status(request, Outcome.REJECTED, "backend must be stopped before target preparation");
+        }
+        if (this.preparedTargets.containsKey(manifest.transactionId())) {
+            return this.status(request, Outcome.SUCCESS, "target rollback point is already prepared");
+        }
+        final Path world = this.resolveWorld(manifest.worldDirectory());
+        Files.createDirectories(this.backupRoot);
+        Files.createDirectories(this.transactionRoot);
+        final long existingBytes = Files.isDirectory(world) ? directoryBytes(world) : 0L;
+        final long required = safetyMargin(saturatedAdd(existingBytes, manifest.estimatedBytes()));
+        if (usableBytes(this.backupRoot) < required) {
+            return this.status(request, Outcome.REJECTED,
+                "insufficient target backup/staging space: requires " + required + " bytes with safety margin");
+        }
+        final OfflineTargetTransactionPreparer.PreparedTarget result =
+            OfflineTargetTransactionPreparer.prepare(
+                new OfflineTargetTransactionPreparer.Plan(
+                    manifest.transactionId(),
+                    world,
+                    this.backupRoot,
+                    this.transactionRoot
+                ),
+                manifest.transactionId(),
+                manifest.transactionId(),
+                true
+            );
+        this.preparedTargets.put(manifest.transactionId(), result);
+        return this.status(
+            request,
+            Outcome.SUCCESS,
+            result.worldInitiallyAbsent()
+                ? "target absence rollback point prepared"
+                : "complete target world backup prepared"
+        );
     }
 
     private ProtocolFrame handleLocalRequest(final ProtocolFrame request) throws IOException {

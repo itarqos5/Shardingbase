@@ -250,7 +250,8 @@ public final class WorldTransactionCodec {
         STOP_BACKEND,
         PREPARE_SOURCE,
         RESTART_BACKEND,
-        STATUS
+        STATUS,
+        PREPARE_TARGET
     }
 
     public enum Outcome {

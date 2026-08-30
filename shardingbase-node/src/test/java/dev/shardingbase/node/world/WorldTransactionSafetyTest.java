@@ -90,6 +90,29 @@ class WorldTransactionSafetyTest {
         assertEquals(1, prepared.summary().positiveChunkEntries());
         assertTrue(Files.isRegularFile(prepared.negativeHalf().resolve("region/r.0.0.mca")));
         assertTrue(Files.isRegularFile(prepared.positiveHalf().resolve("region/r.0.0.mca")));
+        assertEquals("metadata", Files.readString(prepared.negativeHalf().resolve("level.dat")));
+        assertEquals("metadata", Files.readString(prepared.positiveHalf().resolve("level.dat")));
+    }
+
+    @Test
+    void journalsAnAbsentTargetRollbackPointBeforeRelay(@TempDir final Path directory) throws Exception {
+        final UUID transactionId = UUID.randomUUID();
+        final OfflineTargetTransactionPreparer.PreparedTarget prepared =
+            OfflineTargetTransactionPreparer.prepare(
+                new OfflineTargetTransactionPreparer.Plan(
+                    transactionId,
+                    directory.resolve("missing-world"),
+                    directory.resolve("backups"),
+                    directory.resolve("transactions")
+                ),
+                transactionId,
+                transactionId,
+                true
+            );
+
+        assertTrue(prepared.worldInitiallyAbsent());
+        assertTrue(Files.isRegularFile(prepared.backup().path().resolve("world.absent")));
+        assertEquals(TransactionPhase.BACKUP_COMPLETE, WorldTransactionJournal.load(prepared.journal()).phase());
     }
 
     @Test
