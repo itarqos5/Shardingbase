@@ -28866,10 +28866,10 @@ index a46b89895a9ce86b6f5fabd373a4e91919d88033..22b10500ef74694243a4fec40822bb54
          // Paper start - PlayerChunkLoadEvent
          if (io.papermc.paper.event.packet.PlayerChunkLoadEvent.getHandlerList().getRegisteredListeners().length > 0) {
 diff --git a/net/minecraft/server/network/config/PrepareSpawnTask.java b/net/minecraft/server/network/config/PrepareSpawnTask.java
-index 3271c83bd103bea9b9ffcd6882b52896ea4da770..f6601bc30fa37a309923ea9883b04233f83b2c0b 100644
+index 5d7a432fa4cae0fb8df4578e32459f22a9af7f4c..ba8b4d59235a924af59183a0631067a7d3ace38e 100644
 --- a/net/minecraft/server/network/config/PrepareSpawnTask.java
 +++ b/net/minecraft/server/network/config/PrepareSpawnTask.java
-@@ -165,7 +165,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
+@@ -175,7 +175,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
          private Vec2 spawnAngle; // Paper - remove final
          private @Nullable CompletableFuture<?> chunkLoadFuture;
          private @Nullable CompletableFuture<org.bukkit.Location> eventFuture; // Paper
@@ -28878,7 +28878,7 @@ index 3271c83bd103bea9b9ffcd6882b52896ea4da770..f6601bc30fa37a309923ea9883b04233
  
          private Preparing(final ServerLevel spawnLevel, final CompletableFuture<Vec3> spawnPosition, final Vec2 spawnAngle) {
              this.spawnLevel = spawnLevel;
-@@ -233,11 +233,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
+@@ -243,11 +243,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
                  }
                  // Paper end - PlayerSpawnLocationEvent
                  ChunkPos spawnChunk = ChunkPos.containing(BlockPos.containing(spawnPosition));
@@ -28892,10 +28892,10 @@ index 3271c83bd103bea9b9ffcd6882b52896ea4da770..f6601bc30fa37a309923ea9883b04233
                  PrepareSpawnTask.this.loadListener.updateFocus(this.spawnLevel.dimension(), spawnChunk);
              }
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index b4845731ba1eaae582afece7e09e2af427b29d6a..1dbb1d49c797be89f3739c2fa226aef25f68ee87 100644
+index 1198827c36cd5d0fe13cf2dd0900bd31df50c696..4c273b8824bc20a12d214e12ae852807833571b9 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
-@@ -982,8 +982,8 @@ public abstract class PlayerList {
+@@ -984,8 +984,8 @@ public abstract class PlayerList {
          player.connection.send(level.clockManager().createFullSyncPacket(player)); // Paper - per-world time; per-player time
          player.connection.send(new ClientboundSetDefaultSpawnPositionPacket(level.getRespawnData()));
          // Paper start - view distances
@@ -28906,7 +28906,7 @@ index b4845731ba1eaae582afece7e09e2af427b29d6a..1dbb1d49c797be89f3739c2fa226aef2
          // Paper end - view distances
          if (level.isRaining()) {
              // CraftBukkit start - handle player weather
-@@ -1200,7 +1200,7 @@ public abstract class PlayerList {
+@@ -1202,7 +1202,7 @@ public abstract class PlayerList {
  
      public void setViewDistance(final int viewDistance) {
          this.viewDistance = viewDistance;
@@ -28915,7 +28915,7 @@ index b4845731ba1eaae582afece7e09e2af427b29d6a..1dbb1d49c797be89f3739c2fa226aef2
  
          for (ServerLevel level : this.server.getAllLevels()) {
              level.getChunkSource().setViewDistance(viewDistance);
-@@ -1209,7 +1209,7 @@ public abstract class PlayerList {
+@@ -1211,7 +1211,7 @@ public abstract class PlayerList {
  
      public void setSimulationDistance(final int simulationDistance) {
          this.simulationDistance = simulationDistance;

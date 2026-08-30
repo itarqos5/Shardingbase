@@ -269,7 +269,7 @@
              }
  
              @Override
-@@ -292,65 +_,146 @@
+@@ -292,65 +_,148 @@
      }
  
      protected void save(final ServerPlayer player) {
@@ -306,6 +306,8 @@
 +        org.bukkit.event.player.PlayerQuitEvent playerQuitEvent = new org.bukkit.event.player.PlayerQuitEvent(player.getBukkitEntity(), leaveMessage, player.quitReason); // Paper - Adventure & Add API for quit reason
 +        this.cserver.getPluginManager().callEvent(playerQuitEvent);
 +        player.getBukkitEntity().disconnect();
++
++        this.cserver.shardingbaseRuntime().replicatePlayerState(player.getBukkitEntity()); // Shardingbase - capture after quit changes
 +
 +        // CraftBukkit end
 +

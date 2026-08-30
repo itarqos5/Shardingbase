@@ -16,6 +16,8 @@ import dev.shardingbase.server.config.ShardingbaseConfigurationLoader;
 import dev.shardingbase.server.validation.BackendValidator;
 import dev.shardingbase.server.validation.LocalNodeValidator;
 import dev.shardingbase.server.validation.ValidationResult;
+import dev.shardingbase.server.player.PlayerStateCoordinator;
+import dev.shardingbase.protocol.PlayerHandoffCodec;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Objects;
@@ -27,6 +29,7 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.UUID;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -47,6 +50,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     private final AtomicReference<ShardManifestRegistry> shardManifests;
     private final AtomicLong generation = new AtomicLong();
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final PlayerStateCoordinator playerStateCoordinator;
     private volatile @Nullable ScheduledFuture<?> retryTask;
     private volatile Runnable menuReloader = () -> {
     };
@@ -92,6 +96,11 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         this.logger = logger;
         this.executor = executor;
         final ShardingbaseConfiguration configuration = this.configurationLoader.load();
+        this.playerStateCoordinator = new PlayerStateCoordinator(
+            configuration.identity().serverId(),
+            serverDirectory,
+            logger
+        );
         this.shardManifests = new AtomicReference<>(ShardManifestRegistry.load(serverDirectory));
         this.snapshot = new AtomicReference<>(new Snapshot(
             configuration.identity(),
@@ -165,6 +174,27 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
      */
     public void menuReloader(final Runnable menuReloader) {
         this.menuReloader = Objects.requireNonNull(menuReloader, "menuReloader");
+    }
+
+    /** Starts an asynchronous lookup for state staged for a joining player. */
+    public CompletionStage<Optional<PlayerHandoffCodec.Stage>> fetchPlayerState(final UUID playerId) {
+        return this.playerStateCoordinator.fetch(playerId);
+    }
+
+    /** Applies a previously fetched state revision on the server thread. */
+    public void applyPlayerState(
+        final org.bukkit.entity.Player player,
+        final Optional<PlayerHandoffCodec.Stage> fetched
+    ) throws java.io.IOException {
+        this.playerStateCoordinator.applyIfNew(player, fetched);
+    }
+
+    /** Captures post-quit state and schedules replication to the currently validated peer. */
+    public void replicatePlayerState(final org.bukkit.entity.Player player) {
+        final PeerStatus peer = this.peerStatus();
+        if (this.featureState() == FeatureState.ENABLED && peer.available()) {
+            this.playerStateCoordinator.captureAndReplicate(player, peer.serverId());
+        }
     }
 
     private void beginValidation(final ServerIdentity identity) {
@@ -248,6 +278,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
             pendingRetry.cancel(true);
         }
         this.executor.shutdownNow();
+        this.playerStateCoordinator.close();
         final Snapshot previous = this.snapshot.get();
         this.snapshot.set(new Snapshot(
             previous.identity(),

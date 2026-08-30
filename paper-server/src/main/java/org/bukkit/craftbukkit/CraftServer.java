@@ -1408,6 +1408,12 @@ public final class CraftServer implements Server {
         return this.console;
     }
 
+    // Shardingbase start - internal lifecycle hooks
+    public dev.shardingbase.server.ShardingbaseRuntime shardingbaseRuntime() {
+        return this.shardingbaseRuntime;
+    }
+    // Shardingbase end
+
     @Override
     public World getWorld(String name) {
         Preconditions.checkArgument(name != null, "name cannot be null");

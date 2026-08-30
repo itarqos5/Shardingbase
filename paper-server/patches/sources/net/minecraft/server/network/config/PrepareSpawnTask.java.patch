@@ -1,6 +1,6 @@
 --- a/net/minecraft/server/network/config/PrepareSpawnTask.java
 +++ b/net/minecraft/server/network/config/PrepareSpawnTask.java
-@@ -36,10 +_,18 @@
+@@ -36,29 +_,89 @@
      private final LevelLoadListener loadListener;
      private PrepareSpawnTask.@Nullable State state;
  
@@ -9,6 +9,7 @@
 +    private final com.mojang.authlib.GameProfile profile;
 +    private final net.minecraft.server.network.ServerConfigurationPacketListenerImpl listener;
 +    private boolean newPlayer;
++    private java.util.concurrent.CompletableFuture<java.util.Optional<dev.shardingbase.protocol.PlayerHandoffCodec.Stage>> shardingbasePlayerState; // Shardingbase
 +
 +    public PrepareSpawnTask(final MinecraftServer server, final com.mojang.authlib.GameProfile profile, final net.minecraft.server.network.ServerConfigurationPacketListenerImpl listener) {
 +        this.profile = profile;
@@ -22,7 +23,18 @@
      }
  
      @Override
-@@ -49,16 +_,58 @@
+     public void start(final Consumer<Packet<?>> connection) {
++        // Shardingbase start - fetch portable state without blocking the server thread
++        this.shardingbasePlayerState = this.server.server.shardingbaseRuntime()
++            .fetchPlayerState(this.nameAndId.id())
++            .toCompletableFuture()
++            .exceptionally(exception -> {
++                LOGGER.warn("Unable to fetch staged Shardingbase player state for {}", this.nameAndId.id(), exception);
++                return java.util.Optional.empty();
++            });
++        // Shardingbase end
+         try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(LOGGER)) {
+             Optional<ValueInput> loadedData = this.server
                  .getPlayerList()
                  .loadPlayerData(this.nameAndId)
                  .map(tag -> TagValueInput.create(reporter, this.server.registryAccess(), tag));
@@ -156,7 +168,17 @@
                  ChunkPos spawnChunk = ChunkPos.containing(BlockPos.containing(spawnPosition));
                  this.chunkLoadCounter
                      .track(
-@@ -172,14 +_,48 @@
+@@ -148,6 +_,9 @@
+             if (!this.chunkLoadFuture.isDone()) {
+                 return null;
+             }
++            if (!PrepareSpawnTask.this.shardingbasePlayerState.isDone()) { // Shardingbase - wait for staged state
++                return null;
++            }
+ 
+             PrepareSpawnTask.this.loadListener.finish(LevelLoadListener.Stage.LOAD_PLAYER_CHUNKS);
+             return PrepareSpawnTask.this.new Ready(this.spawnLevel, spawnPosition, this.spawnAngle);
+@@ -172,14 +_,58 @@
          public ServerPlayer spawn(final Connection connection, final CommonListenerCookie cookie) {
              ChunkPos spawnChunk = ChunkPos.containing(BlockPos.containing(this.spawnPosition));
              this.spawnLevel.waitForEntities(spawnChunk, 3);
@@ -193,6 +215,16 @@
 +                    // CraftBukkit end
                      .map(tag -> TagValueInput.create(reporter, PrepareSpawnTask.this.server.registryAccess(), tag));
                  input.ifPresent(player::load);
++                // Shardingbase start - merge portable state before join events and initial inventory packets
++                try {
++                    PrepareSpawnTask.this.server.server.shardingbaseRuntime().applyPlayerState(
++                        player.getBukkitEntity(),
++                        PrepareSpawnTask.this.shardingbasePlayerState.join()
++                    );
++                } catch (final java.io.IOException exception) {
++                    PrepareSpawnTask.LOGGER.warn("Unable to apply staged Shardingbase player state for {}", player.getUUID(), exception);
++                }
++                // Shardingbase end
 +                // CraftBukkit start - Better rename detection
 +                if (input.isPresent()) {
 +                    player.lastKnownName = input.flatMap(t -> t.child("bukkit")).flatMap(t -> t.getString("lastKnownName")).orElse(null);
