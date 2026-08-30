@@ -107,7 +107,7 @@
  
                      for (Slot slot : this.quickcraftSlots) {
                          ItemStack carriedItemStack = this.getCarried();
-@@ -386,12 +_,42 @@
+@@ -386,12 +_,43 @@
                              int maxSize = Math.min(source.getMaxStackSize(), slot.getMaxStackSize(source));
                              int newCount = Math.min(getQuickCraftPlaceCount(this.quickcraftSlots.size(), this.quickcraftType, source) + carry, maxSize);
                              remaining -= newCount - carry;
@@ -143,6 +143,7 @@
 +                        eventMap
 +                    );
 +                    event.callEvent();
++                    dev.shardingbase.server.menu.ShardingbaseMenuManager.handleDrag(event); // Shardingbase - protect core menu contents
 +
 +                    if (event.getResult() != org.bukkit.event.Event.Result.DENY) {
 +                        for (final it.unimi.dsi.fastutil.ints.Int2ObjectMap.Entry<net.minecraft.world.item.ItemStack> entry : draggedSlots.int2ObjectEntrySet()) {

@@ -274,6 +274,7 @@ public final class CraftServer implements Server {
     private final SimplePluginManager pluginManager; // Paper - Move down
     public final io.papermc.paper.plugin.manager.PaperPluginManagerImpl paperPluginManager;
     private final dev.shardingbase.server.ShardingbaseRuntime shardingbaseRuntime; // Shardingbase
+    private final dev.shardingbase.server.menu.ShardingbaseMenuManager shardingbaseMenus; // Shardingbase
     private final StructureManager structureManager;
     final DedicatedServer console;
     private final DedicatedPlayerList playerList;
@@ -420,10 +421,17 @@ public final class CraftServer implements Server {
             throw new IllegalStateException("Fatal Shardingbase configuration error: " + exception.getMessage(), exception);
         }
         dev.shardingbase.api.Shardingbase.installService(this.shardingbaseRuntime);
+        this.shardingbaseMenus = new dev.shardingbase.server.menu.ShardingbaseMenuManager(
+            this, this.shardingbaseRuntime, console::execute, console.getServerDirectory(), this.logger
+        );
+        this.shardingbaseRuntime.menuReloader(this.shardingbaseMenus::reload);
         this.pluginManager.addPermission(new org.bukkit.permissions.Permission("shardingbase.admin", org.bukkit.permissions.PermissionDefault.OP));
         this.pluginManager.addPermission(new org.bukkit.permissions.Permission("shardingbase.reload", org.bukkit.permissions.PermissionDefault.OP));
         this.pluginManager.addPermission(new org.bukkit.permissions.Permission("shardingbase.sync", org.bukkit.permissions.PermissionDefault.OP));
-        this.commandMap.register("shardingbase", new dev.shardingbase.server.ShardingbaseCommand(this.shardingbaseRuntime, console::execute));
+        this.commandMap.register(
+            "shardingbase",
+            new dev.shardingbase.server.ShardingbaseCommand(this.shardingbaseRuntime, console::execute, this.shardingbaseMenus::openMain)
+        );
         // Shardingbase end
 
         CraftRegistry.setMinecraftRegistry(console.registryAccess());

@@ -38,6 +38,8 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     private final AtomicLong generation = new AtomicLong();
     private final AtomicBoolean closed = new AtomicBoolean();
     private volatile @Nullable ScheduledFuture<?> retryTask;
+    private volatile Runnable menuReloader = () -> {
+    };
 
     /**
      * Loads and starts a runtime rooted at the server directory.
@@ -101,6 +103,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         this.executor.execute(() -> {
             try {
                 final ShardingbaseConfiguration candidate = this.configurationLoader.load();
+                this.menuReloader.run();
                 this.beginValidation(candidate.identity());
                 result.complete(new ReloadResult(true, "configuration accepted; validation is pending"));
             } catch (final ShardingbaseConfigurationException exception) {
@@ -111,6 +114,15 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
             }
         });
         return result;
+    }
+
+    /**
+     * Attaches the independently recoverable menu reload operation.
+     *
+     * @param menuReloader menu reload action
+     */
+    public void menuReloader(final Runnable menuReloader) {
+        this.menuReloader = Objects.requireNonNull(menuReloader, "menuReloader");
     }
 
     private void beginValidation(final ServerIdentity identity) {

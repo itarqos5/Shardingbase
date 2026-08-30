@@ -1981,7 +1981,7 @@
                  this.player.containerMenu.sendAllDataToRemote();
              } else if (!this.player.containerMenu.stillValid(this.player)) {
                  LOGGER.debug("Player {} interacted with invalid menu {}", this.player, this.player.containerMenu);
-@@ -1963,7 +_,298 @@
+@@ -1963,7 +_,299 @@
                  } else {
                      boolean fullResyncNeeded = packet.stateId() != this.player.containerMenu.getStateId();
                      this.player.containerMenu.suppressRemoteUpdates();
@@ -2261,6 +2261,7 @@
 +                        event.setCancelled(cancelled);
 +                        net.minecraft.world.inventory.AbstractContainerMenu oldContainer = this.player.containerMenu; // SPIGOT-1224
 +                        this.cserver.getPluginManager().callEvent(event);
++                        dev.shardingbase.server.menu.ShardingbaseMenuManager.handleClick(event); // Shardingbase - core menu authorization
 +                        if (this.player.containerMenu != oldContainer) {
 +                            this.player.containerMenu.resumeRemoteUpdates();
 +                            this.player.containerMenu.broadcastFullState();

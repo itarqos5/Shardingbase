@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Executor;
+import java.util.function.Consumer;
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.defaults.BukkitCommand;
@@ -19,11 +20,17 @@ public final class ShardingbaseCommand extends BukkitCommand {
     private static final String SYNC_PERMISSION = "shardingbase.sync";
     private final ShardingbaseRuntime runtime;
     private final Executor serverExecutor;
+    private final Consumer<Player> menuOpener;
 
-    public ShardingbaseCommand(final ShardingbaseRuntime runtime, final Executor serverExecutor) {
+    public ShardingbaseCommand(
+        final ShardingbaseRuntime runtime,
+        final Executor serverExecutor,
+        final Consumer<Player> menuOpener
+    ) {
         super("shardingbase");
         this.runtime = runtime;
         this.serverExecutor = serverExecutor;
+        this.menuOpener = menuOpener;
         this.description = "Shows and manages Shardingbase distributed features";
         this.usageMessage = "/shardingbase [reload|sync|help]";
     }
@@ -81,11 +88,11 @@ public final class ShardingbaseCommand extends BukkitCommand {
         if (!allowed(sender, SYNC_PERMISSION)) {
             return true;
         }
-        if (!(sender instanceof Player)) {
+        if (!(sender instanceof final Player player)) {
             sender.sendMessage("/shardingbase sync can only be used by a player.");
             return true;
         }
-        sender.sendMessage("The Shardingbase sync menu is unavailable until distributed features are enabled.");
+        this.menuOpener.accept(player);
         return true;
     }
 
