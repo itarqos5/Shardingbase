@@ -6,6 +6,7 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Properties;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -89,6 +90,29 @@ class WorldTransactionSafetyTest {
         assertEquals(1, prepared.summary().positiveChunkEntries());
         assertTrue(Files.isRegularFile(prepared.negativeHalf().resolve("region/r.0.0.mca")));
         assertTrue(Files.isRegularFile(prepared.positiveHalf().resolve("region/r.0.0.mca")));
+    }
+
+    @Test
+    void writesBackendOwnershipManifestAtomically(@TempDir final Path directory) throws Exception {
+        final Path world = directory.resolve("world");
+        Files.createDirectories(world);
+        final UUID transactionId = UUID.randomUUID();
+        final Path path = ShardManifestWriter.write(world, new ShardManifestWriter.Manifest(
+            "minecraft:overworld",
+            transactionId,
+            ShardAxis.Z,
+            -4,
+            ShardSide.POSITIVE,
+            "peer-a"
+        ));
+
+        final Properties properties = new Properties();
+        try (var input = Files.newInputStream(path)) {
+            properties.load(input);
+        }
+        assertEquals("1", properties.getProperty("format-version"));
+        assertEquals(transactionId.toString(), properties.getProperty("transaction-id"));
+        assertEquals("POSITIVE", properties.getProperty("owned-side"));
     }
 
     private static void writeRegion(final Path path) throws IOException {

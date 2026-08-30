@@ -39,10 +39,12 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     private static final Duration MAX_RETRY_DELAY = Duration.ofSeconds(60);
 
     private final ShardingbaseConfigurationLoader configurationLoader;
+    private final Path serverDirectory;
     private final BackendValidator validator;
     private final Logger logger;
     private final ScheduledExecutorService executor;
     private final AtomicReference<Snapshot> snapshot;
+    private final AtomicReference<ShardManifestRegistry> shardManifests;
     private final AtomicLong generation = new AtomicLong();
     private final AtomicBoolean closed = new AtomicBoolean();
     private volatile @Nullable ScheduledFuture<?> retryTask;
@@ -72,7 +74,8 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
             new ShardingbaseConfigurationLoader(configurationPath),
             new LocalNodeValidator(minecraftVersion, shardingbaseVersion),
             logger,
-            createExecutor()
+            createExecutor(),
+            serverDirectory.toAbsolutePath().normalize()
         );
     }
 
@@ -80,13 +83,16 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         final ShardingbaseConfigurationLoader configurationLoader,
         final BackendValidator validator,
         final Logger logger,
-        final ScheduledExecutorService executor
+        final ScheduledExecutorService executor,
+        final Path serverDirectory
     ) throws ShardingbaseConfigurationException {
         this.configurationLoader = configurationLoader;
+        this.serverDirectory = serverDirectory;
         this.validator = validator;
         this.logger = logger;
         this.executor = executor;
         final ShardingbaseConfiguration configuration = this.configurationLoader.load();
+        this.shardManifests = new AtomicReference<>(ShardManifestRegistry.load(serverDirectory));
         this.snapshot = new AtomicReference<>(new Snapshot(
             configuration.identity(),
             FeatureState.PENDING,
@@ -118,7 +124,9 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
 
     @Override
     public Ownership ownership(final WorldPosition position) {
-        return this.featureState() == FeatureState.MAINTENANCE ? Ownership.MAINTENANCE : Ownership.UNSHARDED;
+        return this.featureState() == FeatureState.MAINTENANCE
+            ? Ownership.MAINTENANCE
+            : this.shardManifests.get().ownership(position);
     }
 
     @Override
@@ -135,7 +143,9 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         this.executor.execute(() -> {
             try {
                 final ShardingbaseConfiguration candidate = this.configurationLoader.load();
+                final ShardManifestRegistry candidateManifests = ShardManifestRegistry.load(this.serverDirectory);
                 this.menuReloader.run();
+                this.shardManifests.set(candidateManifests);
                 this.beginValidation(candidate.identity());
                 result.complete(new ReloadResult(true, "configuration accepted; validation is pending"));
             } catch (final ShardingbaseConfigurationException exception) {
@@ -205,10 +215,11 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
 
     private void publishDisabled(final ServerIdentity identity, final long expectedGeneration, final String detail) {
         if (this.generation.get() == expectedGeneration && !this.closed.get()) {
+            final boolean maintenance = this.shardManifests.get().isSharded();
             this.snapshot.set(new Snapshot(
                 identity,
-                FeatureState.DISABLED,
-                detail,
+                maintenance ? FeatureState.MAINTENANCE : FeatureState.DISABLED,
+                maintenance ? "shard ownership maintenance lock: " + detail : detail,
                 new PeerStatus(false, "", "", detail)
             ));
         }
