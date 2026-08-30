@@ -27,11 +27,13 @@ public final class ShardingbaseNode {
                 return;
             }
 
-            System.out.println("Starting the Shardingbase backend as a supervised process.");
-            final int exitCode = BackendProcess.run(extraction.path(), args);
-            System.out.println("Shardingbase backend exited with code " + exitCode + '.');
-            if (exitCode != 0) {
-                System.exit(exitCode);
+            try (LocalBackendController controller = LocalBackendController.start()) {
+                System.out.println("Starting the Shardingbase backend as a supervised process.");
+                final int exitCode = BackendProcess.run(extraction.path(), args, controller.childEnvironment());
+                System.out.println("Shardingbase backend exited with code " + exitCode + '.');
+                if (exitCode != 0) {
+                    System.exit(exitCode);
+                }
             }
         } catch (InterruptedException _) {
             Thread.currentThread().interrupt();

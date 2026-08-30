@@ -416,7 +416,9 @@ public final class CraftServer implements Server {
 
         // Shardingbase start - initialize before plugin discovery
         try {
-            this.shardingbaseRuntime = dev.shardingbase.server.ShardingbaseRuntime.start(console.getServerDirectory(), this.logger);
+            this.shardingbaseRuntime = dev.shardingbase.server.ShardingbaseRuntime.start(
+                console.getServerDirectory(), this.logger, console.getServerVersion(), this.serverVersion
+            );
         } catch (final dev.shardingbase.server.config.ShardingbaseConfigurationException exception) {
             throw new IllegalStateException("Fatal Shardingbase configuration error: " + exception.getMessage(), exception);
         }

@@ -6,33 +6,39 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
  * Launches and supervises the extracted backend in its own JVM.
  */
 final class BackendProcess {
-    private static final long SHUTDOWN_TIMEOUT_SECONDS = 30L;
+    private static final long SHUTDOWN_TIMEOUT_SECONDS = 60L;
 
     private BackendProcess() {
     }
 
-    static int run(final Path backendJar, final String[] serverArguments) throws IOException, InterruptedException {
+    static int run(
+        final Path backendJar,
+        final String[] serverArguments,
+        final Map<String, String> childEnvironment
+    ) throws IOException, InterruptedException {
         final Path normalizedBackend = backendJar.toAbsolutePath().normalize();
         final Path workingDirectory = normalizedBackend.getParent();
         if (workingDirectory == null) {
             throw new IOException("Backend JAR has no working directory: " + normalizedBackend);
         }
 
-        final Process process = new ProcessBuilder(command(
+        final ProcessBuilder builder = new ProcessBuilder(command(
             javaExecutable(),
             ManagementFactory.getRuntimeMXBean().getInputArguments(),
             normalizedBackend,
             serverArguments
         ))
             .directory(workingDirectory.toFile())
-            .inheritIO()
-            .start();
+            .inheritIO();
+        builder.environment().putAll(childEnvironment);
+        final Process process = builder.start();
 
         final Thread shutdownHook = Thread.ofPlatform()
             .name("shardingbase-backend-shutdown")
@@ -77,12 +83,10 @@ final class BackendProcess {
         process.destroy();
         try {
             if (!process.waitFor(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                process.destroyForcibly();
-                process.waitFor(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                System.err.println("Backend did not stop within 60 seconds; refusing to force-kill it.");
             }
         } catch (InterruptedException _) {
             Thread.currentThread().interrupt();
-            process.destroyForcibly();
         }
     }
 }

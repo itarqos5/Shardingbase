@@ -24,14 +24,27 @@ public final class LocalNodeValidator implements BackendValidator {
     private static final Duration TIMEOUT = Duration.ofSeconds(10);
 
     private final Map<String, String> environment;
+    private final String minecraftVersion;
+    private final String shardingbaseVersion;
 
-    /** Creates a validator using the process environment. */
-    public LocalNodeValidator() {
-        this(System.getenv());
+    /**
+     * Creates a validator using the process environment.
+     *
+     * @param minecraftVersion running Minecraft version
+     * @param shardingbaseVersion running Shardingbase build version
+     */
+    public LocalNodeValidator(final String minecraftVersion, final String shardingbaseVersion) {
+        this(System.getenv(), minecraftVersion, shardingbaseVersion);
     }
 
-    LocalNodeValidator(final Map<String, String> environment) {
+    LocalNodeValidator(
+        final Map<String, String> environment,
+        final String minecraftVersion,
+        final String shardingbaseVersion
+    ) {
         this.environment = Map.copyOf(environment);
+        this.minecraftVersion = minecraftVersion;
+        this.shardingbaseVersion = shardingbaseVersion;
     }
 
     @Override
@@ -65,6 +78,8 @@ public final class LocalNodeValidator implements BackendValidator {
                 writeField(output, token);
                 writeField(output, identity.serverId());
                 writeField(output, identity.serverName());
+                writeField(output, this.minecraftVersion);
+                writeField(output, this.shardingbaseVersion);
                 output.flush();
 
                 if (input.readInt() != ShardingbaseProtocol.MAGIC) {

@@ -46,15 +46,22 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
      *
      * @param serverDirectory server working directory
      * @param logger server logger
+     * @param minecraftVersion running Minecraft version
+     * @param shardingbaseVersion running Shardingbase build version
      * @return initialized runtime
      * @throws ShardingbaseConfigurationException if the primary identity configuration is fatally invalid
      */
-    public static ShardingbaseRuntime start(final Path serverDirectory, final Logger logger)
+    public static ShardingbaseRuntime start(
+        final Path serverDirectory,
+        final Logger logger,
+        final String minecraftVersion,
+        final String shardingbaseVersion
+    )
         throws ShardingbaseConfigurationException {
         final Path configurationPath = serverDirectory.resolve("config").resolve("shardingbase.yml");
         return new ShardingbaseRuntime(
             new ShardingbaseConfigurationLoader(configurationPath),
-            new LocalNodeValidator(),
+            new LocalNodeValidator(minecraftVersion, shardingbaseVersion),
             logger,
             createExecutor()
         );
