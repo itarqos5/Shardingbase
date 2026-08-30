@@ -36,10 +36,11 @@ public final class ShardingbaseNode {
             try (
                 ProxyValidationClient proxyClient = new ProxyValidationClient();
                 NodeFileTransferHandler fileTransfers = new NodeFileTransferHandler(proxyClient, stagingRoot());
-                LocalBackendController controller = LocalBackendController.start(proxyClient)
+                LocalBackendController controller = LocalBackendController.start(proxyClient);
+                BackendProcess backend = BackendProcess.launch(extraction.path(), args, controller.childEnvironment())
             ) {
                 System.out.println("Starting the Shardingbase backend as a supervised process.");
-                final int exitCode = BackendProcess.run(extraction.path(), args, controller.childEnvironment());
+                final int exitCode = backend.waitForExit();
                 System.out.println("Shardingbase backend exited with code " + exitCode + '.');
                 if (exitCode != 0) {
                     System.exit(exitCode);

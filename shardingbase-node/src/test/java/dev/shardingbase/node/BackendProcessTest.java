@@ -1,6 +1,8 @@
 package dev.shardingbase.node;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -61,5 +63,15 @@ class BackendProcessTest {
             Map.of(BackendProcess.BACKEND_MEMORY_ENVIRONMENT, "64")
         ));
         assertTrue(exception.getMessage().contains("at least 512"));
+    }
+
+    @Test
+    void writesOneCanonicalConsoleCommandLine() throws Exception {
+        final ByteArrayOutputStream output = new ByteArrayOutputStream();
+
+        BackendProcess.writeConsoleCommand(output, "stop");
+
+        assertEquals("stop" + System.lineSeparator(), output.toString(StandardCharsets.UTF_8));
+        assertThrows(IOException.class, () -> BackendProcess.writeConsoleCommand(output, "stop\nrestart"));
     }
 }

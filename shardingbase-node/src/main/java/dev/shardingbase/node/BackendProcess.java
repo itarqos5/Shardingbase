@@ -1,60 +1,243 @@
 package dev.shardingbase.node;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Launches and supervises the extracted backend in its own JVM.
+ * Stateful supervisor for the extracted backend JVM.
+ *
+ * <p>The child owns stdout and stderr. The node owns stdin so it can relay the
+ * process manager's console while still being able to issue an ordered,
+ * graceful Minecraft {@code stop} during an offline world transaction.</p>
  */
-final class BackendProcess {
+final class BackendProcess implements AutoCloseable {
     static final String BACKEND_MEMORY_ENVIRONMENT = "SHARDINGBASE_BACKEND_MEMORY_MB";
-    private static final long SHUTDOWN_TIMEOUT_SECONDS = 60L;
+    static final Duration SHUTDOWN_TIMEOUT = Duration.ofSeconds(60);
     private static final int MINIMUM_BACKEND_MEMORY_MIB = 512;
 
-    private BackendProcess() {
+    private final Path backendJar;
+    private final Path workingDirectory;
+    private final String[] serverArguments;
+    private final Map<String, String> childEnvironment;
+    private final List<String> jvmArguments;
+    private final InputStream consoleInput;
+    private final ProcessLauncher launcher;
+    private final Object inputLock = new Object();
+    private final Thread consoleRelay;
+    private final Thread shutdownHook;
+
+    private Process process;
+    private Integer lastExitCode;
+    private boolean gracefulStopRequested;
+    private boolean closed;
+
+    private BackendProcess(
+        final Path backendJar,
+        final String[] serverArguments,
+        final Map<String, String> childEnvironment,
+        final List<String> inheritedJvmArguments,
+        final Map<String, String> environment,
+        final InputStream consoleInput,
+        final ProcessLauncher launcher
+    ) throws IOException {
+        this.backendJar = backendJar.toAbsolutePath().normalize();
+        this.workingDirectory = this.backendJar.getParent();
+        if (this.workingDirectory == null) {
+            throw new IOException("Backend JAR has no working directory: " + this.backendJar);
+        }
+        this.serverArguments = serverArguments.clone();
+        this.childEnvironment = Map.copyOf(childEnvironment);
+        this.jvmArguments = backendJvmArguments(inheritedJvmArguments, environment);
+        this.consoleInput = Objects.requireNonNull(consoleInput, "consoleInput");
+        this.launcher = Objects.requireNonNull(launcher, "launcher");
+        this.consoleRelay = Thread.ofPlatform()
+            .daemon(true)
+            .name("Shardingbase Backend Console")
+            .unstarted(this::relayConsole);
+        this.shutdownHook = Thread.ofPlatform()
+            .name("shardingbase-backend-shutdown")
+            .unstarted(this::stopForNodeShutdown);
     }
 
-    static int run(
+    static BackendProcess launch(
         final Path backendJar,
         final String[] serverArguments,
         final Map<String, String> childEnvironment
-    ) throws IOException, InterruptedException {
-        final Path normalizedBackend = backendJar.toAbsolutePath().normalize();
-        final Path workingDirectory = normalizedBackend.getParent();
-        if (workingDirectory == null) {
-            throw new IOException("Backend JAR has no working directory: " + normalizedBackend);
-        }
+    ) throws IOException {
+        final BackendProcess supervisor = new BackendProcess(
+            backendJar,
+            serverArguments,
+            childEnvironment,
+            ManagementFactory.getRuntimeMXBean().getInputArguments(),
+            System.getenv(),
+            System.in,
+            ProcessBuilder::start
+        );
+        supervisor.start();
+        Runtime.getRuntime().addShutdownHook(supervisor.shutdownHook);
+        supervisor.consoleRelay.start();
+        return supervisor;
+    }
 
+    synchronized void start() throws IOException {
+        this.requireOpen();
+        if (this.process != null && this.process.isAlive()) {
+            throw new IOException("Shardingbase backend is already running");
+        }
         final ProcessBuilder builder = new ProcessBuilder(command(
             javaExecutable(),
-            backendJvmArguments(ManagementFactory.getRuntimeMXBean().getInputArguments(), System.getenv()),
-            normalizedBackend,
-            serverArguments
+            this.jvmArguments,
+            this.backendJar,
+            this.serverArguments
         ))
-            .directory(workingDirectory.toFile())
-            .inheritIO();
-        builder.environment().putAll(childEnvironment);
-        final Process process = builder.start();
+            .directory(this.workingDirectory.toFile())
+            .redirectOutput(ProcessBuilder.Redirect.INHERIT)
+            .redirectError(ProcessBuilder.Redirect.INHERIT);
+        builder.environment().putAll(this.childEnvironment);
+        this.process = this.launcher.start(builder);
+        this.lastExitCode = null;
+        this.gracefulStopRequested = false;
+    }
 
-        final Thread shutdownHook = Thread.ofPlatform()
-            .name("shardingbase-backend-shutdown")
-            .unstarted(() -> stop(process));
-        Runtime.getRuntime().addShutdownHook(shutdownHook);
-        try {
-            return process.waitFor();
-        } finally {
-            try {
-                Runtime.getRuntime().removeShutdownHook(shutdownHook);
-            } catch (IllegalStateException _) {
-                // The JVM is already shutting down and the hook is responsible for the child.
+    int waitForExit() throws InterruptedException {
+        final Process child;
+        synchronized (this) {
+            child = this.process;
+            if (child == null) {
+                throw new IllegalStateException("Shardingbase backend has not been started");
             }
         }
+        final int exitCode = child.waitFor();
+        this.recordExit(child, exitCode);
+        return exitCode;
+    }
+
+    boolean stopGracefully() throws IOException, InterruptedException {
+        return this.stopGracefully(SHUTDOWN_TIMEOUT);
+    }
+
+    boolean stopGracefully(final Duration timeout) throws IOException, InterruptedException {
+        Objects.requireNonNull(timeout, "timeout");
+        if (timeout.isNegative() || timeout.isZero()) {
+            throw new IllegalArgumentException("Graceful shutdown timeout must be positive");
+        }
+        final Process child;
+        synchronized (this) {
+            child = this.process;
+            if (child == null || !child.isAlive()) {
+                if (child != null) {
+                    this.recordExit(child, child.exitValue());
+                }
+                return true;
+            }
+            this.gracefulStopRequested = true;
+        }
+        this.writeToChild(child, "stop");
+        if (!child.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
+            return false;
+        }
+        this.recordExit(child, child.exitValue());
+        return true;
+    }
+
+    synchronized void restart() throws IOException {
+        this.requireOpen();
+        if (this.process != null && this.process.isAlive()) {
+            throw new IOException("Cannot restart Shardingbase while the backend is still running");
+        }
+        this.start();
+    }
+
+    synchronized Status status() {
+        if (this.process != null && !this.process.isAlive() && this.lastExitCode == null) {
+            this.recordExit(this.process, this.process.exitValue());
+        }
+        return new Status(
+            this.process != null && this.process.isAlive(),
+            this.process == null ? null : this.process.pid(),
+            this.lastExitCode,
+            this.gracefulStopRequested
+        );
+    }
+
+    private void relayConsole() {
+        final byte[] buffer = new byte[1024];
+        try {
+            int read;
+            while ((read = this.consoleInput.read(buffer)) >= 0) {
+                if (read == 0) {
+                    continue;
+                }
+                final Process child;
+                synchronized (this) {
+                    child = this.process;
+                }
+                if (child != null && child.isAlive()) {
+                    synchronized (this.inputLock) {
+                        final OutputStream childInput = child.getOutputStream();
+                        childInput.write(buffer, 0, read);
+                        childInput.flush();
+                    }
+                }
+            }
+        } catch (final IOException exception) {
+            synchronized (this) {
+                if (!this.closed) {
+                    System.err.println("Shardingbase backend console relay stopped: " + exception.getMessage());
+                }
+            }
+        }
+    }
+
+    private void writeToChild(final Process child, final String command) throws IOException {
+        synchronized (this.inputLock) {
+            writeConsoleCommand(child.getOutputStream(), command);
+        }
+    }
+
+    private void stopForNodeShutdown() {
+        try {
+            if (!this.stopGracefully()) {
+                System.err.println("Backend did not stop within 60 seconds; refusing to force-kill it.");
+            }
+        } catch (final InterruptedException _) {
+            Thread.currentThread().interrupt();
+        } catch (final IOException exception) {
+            System.err.println("Unable to send the graceful backend stop command: " + exception.getMessage());
+        }
+    }
+
+    private synchronized void recordExit(final Process expected, final int exitCode) {
+        if (this.process == expected) {
+            this.lastExitCode = exitCode;
+        }
+    }
+
+    private synchronized void requireOpen() throws IOException {
+        if (this.closed) {
+            throw new IOException("Shardingbase backend supervisor is closed");
+        }
+    }
+
+    static void writeConsoleCommand(final OutputStream output, final String command) throws IOException {
+        Objects.requireNonNull(output, "output");
+        Objects.requireNonNull(command, "command");
+        if (command.isBlank() || command.indexOf('\r') >= 0 || command.indexOf('\n') >= 0) {
+            throw new IOException("Backend console command must be one non-blank line");
+        }
+        output.write((command + System.lineSeparator()).getBytes(StandardCharsets.UTF_8));
+        output.flush();
     }
 
     static List<String> backendJvmArguments(
@@ -115,18 +298,36 @@ final class BackendProcess {
         return Path.of(System.getProperty("java.home"), "bin", executable).toAbsolutePath().normalize();
     }
 
-    private static void stop(final Process process) {
-        if (!process.isAlive()) {
-            return;
+    @Override
+    public void close() {
+        synchronized (this) {
+            if (this.closed) {
+                return;
+            }
+            this.closed = true;
         }
-
-        process.destroy();
         try {
-            if (!process.waitFor(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            if (!this.stopGracefully()) {
                 System.err.println("Backend did not stop within 60 seconds; refusing to force-kill it.");
             }
-        } catch (InterruptedException _) {
+        } catch (final InterruptedException _) {
             Thread.currentThread().interrupt();
+        } catch (final IOException exception) {
+            System.err.println("Unable to stop the Shardingbase backend: " + exception.getMessage());
         }
+        this.consoleRelay.interrupt();
+        try {
+            Runtime.getRuntime().removeShutdownHook(this.shutdownHook);
+        } catch (final IllegalStateException _) {
+            // The JVM is already shutting down and the hook owns child cleanup.
+        }
+    }
+
+    record Status(boolean running, Long processId, Integer lastExitCode, boolean gracefulStopRequested) {
+    }
+
+    @FunctionalInterface
+    private interface ProcessLauncher {
+        Process start(ProcessBuilder builder) throws IOException;
     }
 }
