@@ -42,16 +42,20 @@ class PlayerHandoffCodecTest {
         assertEquals(42, acknowledgement.revision());
         assertTrue(acknowledgement.accepted());
 
+        final PlayerHandoffCodec.TransferDestination destination = new PlayerHandoffCodec.TransferDestination(
+            "minecraft:overworld", UUID.randomUUID(), 32.5, 70.0, -16.25, 90.0F, -12.0F
+        );
         final PlayerHandoffCodec.Stage stage = PlayerHandoffCodec.decodeStage(PlayerHandoffCodec.encodeStage(
             new PlayerHandoffCodec.Stage("backend-b", new PlayerSnapshot(
                 playerId,
                 42,
                 "backend-a",
                 Map.of(PlayerDataCategory.INVENTORY, new byte[] {1})
-            ))
+            ), destination)
         ));
         assertEquals("backend-b", stage.targetBackendId());
         assertEquals(42, stage.snapshot().revision());
+        assertEquals(destination, stage.destination());
 
         final PlayerHandoffCodec.Fetch fetch = PlayerHandoffCodec.decodeFetch(PlayerHandoffCodec.encodeFetch(
             new PlayerHandoffCodec.Fetch(playerId, "backend-b")
@@ -67,6 +71,21 @@ class PlayerHandoffCodecTest {
             PlayerHandoffCodec.encodeFetchResponse(new PlayerHandoffCodec.FetchResponse(null))
         );
         assertEquals(null, absent.stage());
+
+        final PlayerHandoffCodec.BoundaryRequest boundary = PlayerHandoffCodec.decodeBoundaryRequest(
+            PlayerHandoffCodec.encodeBoundaryRequest(new PlayerHandoffCodec.BoundaryRequest(
+                playerId, "backend-a", "backend-b", destination
+            ))
+        );
+        assertEquals(destination, boundary.destination());
+        assertEquals("backend-a", boundary.sourceBackendId());
+
+        final PlayerHandoffCodec.BoundaryResponse boundaryResponse = PlayerHandoffCodec.decodeBoundaryResponse(
+            PlayerHandoffCodec.encodeBoundaryResponse(new PlayerHandoffCodec.BoundaryResponse(
+                playerId, true, "capture requested"
+            ))
+        );
+        assertTrue(boundaryResponse.accepted());
     }
 
     @Test

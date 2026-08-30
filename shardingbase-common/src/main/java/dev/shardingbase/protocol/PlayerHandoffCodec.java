@@ -105,6 +105,10 @@ public final class PlayerHandoffCodec {
             writeString(output, stage.targetBackendId());
             output.writeInt(snapshot.length);
             output.write(snapshot);
+            output.writeBoolean(stage.destination() != null);
+            if (stage.destination() != null) {
+                writeDestination(output, stage.destination());
+            }
         }
         return bytes.toByteArray();
     }
@@ -117,10 +121,70 @@ public final class PlayerHandoffCodec {
                 throw new ProtocolException("Invalid staged player snapshot length");
             }
             final PlayerSnapshot snapshot = PlayerSnapshotCodec.decode(input.readNBytes(length));
-            if (input.available() != 0) {
-                throw new ProtocolException("Trailing staged player snapshot payload");
+            final TransferDestination destination;
+            if (input.available() == 0) {
+                destination = null;
+            } else {
+                destination = input.readBoolean() ? readDestination(input) : null;
+                if (input.available() != 0) {
+                    throw new ProtocolException("Trailing staged player snapshot payload");
+                }
             }
-            return new Stage(target, snapshot);
+            return new Stage(target, snapshot, destination);
+        }
+    }
+
+    public static byte[] encodeBoundaryRequest(final BoundaryRequest request) throws IOException {
+        final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (DataOutputStream output = new DataOutputStream(bytes)) {
+            writeUuid(output, request.playerId());
+            writeString(output, request.sourceBackendId());
+            writeString(output, request.targetBackendId());
+            writeDestination(output, request.destination());
+        }
+        return bytes.toByteArray();
+    }
+
+    public static BoundaryRequest decodeBoundaryRequest(final byte[] payload) throws IOException {
+        try (DataInputStream input = input(payload)) {
+            final BoundaryRequest request = new BoundaryRequest(
+                readUuid(input),
+                readString(input),
+                readString(input),
+                readDestination(input)
+            );
+            if (input.available() != 0) {
+                throw new ProtocolException("Trailing player boundary request");
+            }
+            return request;
+        } catch (final IllegalArgumentException exception) {
+            throw new ProtocolException("Invalid player boundary request", exception);
+        }
+    }
+
+    public static byte[] encodeBoundaryResponse(final BoundaryResponse response) throws IOException {
+        final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (DataOutputStream output = new DataOutputStream(bytes)) {
+            writeUuid(output, response.playerId());
+            output.writeBoolean(response.accepted());
+            writeString(output, response.detail());
+        }
+        return bytes.toByteArray();
+    }
+
+    public static BoundaryResponse decodeBoundaryResponse(final byte[] payload) throws IOException {
+        try (DataInputStream input = input(payload)) {
+            final BoundaryResponse response = new BoundaryResponse(
+                readUuid(input),
+                input.readBoolean(),
+                readString(input)
+            );
+            if (input.available() != 0) {
+                throw new ProtocolException("Trailing player boundary response");
+            }
+            return response;
+        } catch (final IllegalArgumentException exception) {
+            throw new ProtocolException("Invalid player boundary response", exception);
         }
     }
 
@@ -208,6 +272,31 @@ public final class PlayerHandoffCodec {
         return new UUID(input.readLong(), input.readLong());
     }
 
+    private static void writeDestination(
+        final DataOutputStream output,
+        final TransferDestination destination
+    ) throws IOException {
+        writeString(output, destination.worldKey());
+        writeUuid(output, destination.worldId());
+        output.writeDouble(destination.x());
+        output.writeDouble(destination.y());
+        output.writeDouble(destination.z());
+        output.writeFloat(destination.yaw());
+        output.writeFloat(destination.pitch());
+    }
+
+    private static TransferDestination readDestination(final DataInputStream input) throws IOException {
+        return new TransferDestination(
+            readString(input),
+            readUuid(input),
+            input.readDouble(),
+            input.readDouble(),
+            input.readDouble(),
+            input.readFloat(),
+            input.readFloat()
+        );
+    }
+
     private static void writeString(final DataOutputStream output, final String value) throws IOException {
         final byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
         if (bytes.length == 0 || bytes.length > ShardingbaseProtocol.MAX_CONTROL_FIELD_BYTES) {
@@ -253,10 +342,55 @@ public final class PlayerHandoffCodec {
         }
     }
 
-    public record Stage(String targetBackendId, PlayerSnapshot snapshot) {
+    public record Stage(String targetBackendId, PlayerSnapshot snapshot, TransferDestination destination) {
         public Stage {
             if (targetBackendId == null || targetBackendId.isBlank() || snapshot == null) {
                 throw new IllegalArgumentException("Staged player snapshot fields are required");
+            }
+        }
+
+        public Stage(final String targetBackendId, final PlayerSnapshot snapshot) {
+            this(targetBackendId, snapshot, null);
+        }
+    }
+
+    public record TransferDestination(
+        String worldKey,
+        UUID worldId,
+        double x,
+        double y,
+        double z,
+        float yaw,
+        float pitch
+    ) {
+        public TransferDestination {
+            if (worldKey == null || worldKey.isBlank() || worldId == null
+                || !Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)
+                || !Float.isFinite(yaw) || !Float.isFinite(pitch)) {
+                throw new IllegalArgumentException("Transfer destination fields are required and finite");
+            }
+        }
+    }
+
+    public record BoundaryRequest(
+        UUID playerId,
+        String sourceBackendId,
+        String targetBackendId,
+        TransferDestination destination
+    ) {
+        public BoundaryRequest {
+            if (playerId == null || sourceBackendId == null || sourceBackendId.isBlank()
+                || targetBackendId == null || targetBackendId.isBlank() || destination == null
+                || sourceBackendId.equals(targetBackendId)) {
+                throw new IllegalArgumentException("Player boundary request fields are required");
+            }
+        }
+    }
+
+    public record BoundaryResponse(UUID playerId, boolean accepted, String detail) {
+        public BoundaryResponse {
+            if (playerId == null || detail == null || detail.isBlank()) {
+                throw new IllegalArgumentException("Player boundary response fields are required");
             }
         }
     }
