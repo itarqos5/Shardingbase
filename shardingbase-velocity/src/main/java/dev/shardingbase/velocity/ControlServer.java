@@ -195,6 +195,11 @@ final class ControlServer implements AutoCloseable {
                 MessageType.PLAYER_SNAPSHOT_ACK,
                 this.stagePlayerSnapshot(source.nodeId(), frame)
             ));
+            case PLAYER_SNAPSHOT_FETCH -> source.send(response(
+                frame,
+                MessageType.PLAYER_SNAPSHOT_FETCH_RESPONSE,
+                this.fetchPlayerSnapshot(source.nodeId(), frame)
+            ));
             default -> source.send(error(frame, "unexpected message for Velocity authority"));
         }
     }
@@ -236,6 +241,22 @@ final class ControlServer implements AutoCloseable {
         return PlayerHandoffCodec.encodeAcknowledgement(new PlayerHandoffCodec.Acknowledgement(
             snapshot.playerId(), snapshot.revision(), accepted, result.name().toLowerCase(java.util.Locale.ROOT)
         ));
+    }
+
+    private byte[] fetchPlayerSnapshot(final String nodeId, final ProtocolFrame frame) throws IOException {
+        final PlayerHandoffCodec.Fetch fetch = PlayerHandoffCodec.decodeFetch(frame.payload());
+        if (!this.registry.nodeIdForTarget(fetch.targetBackendId()).filter(nodeId::equals).isPresent()) {
+            throw new IOException("snapshot target is not owned by this node");
+        }
+        final var stored = this.playerStateStore.load(fetch.playerId());
+        PlayerHandoffCodec.Stage stage = null;
+        if (stored.isPresent()) {
+            final PlayerHandoffCodec.Stage candidate = PlayerHandoffCodec.decodeStage(stored.orElseThrow().snapshot());
+            if (candidate.targetBackendId().equals(fetch.targetBackendId())) {
+                stage = candidate;
+            }
+        }
+        return PlayerHandoffCodec.encodeFetchResponse(new PlayerHandoffCodec.FetchResponse(stage));
     }
 
     private ValidationResponse validate(final String nodeId, final ProtocolFrame frame) throws IOException {

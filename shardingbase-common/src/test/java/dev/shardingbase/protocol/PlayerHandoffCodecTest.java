@@ -41,6 +41,21 @@ class PlayerHandoffCodecTest {
         ));
         assertEquals("backend-b", stage.targetBackendId());
         assertEquals(42, stage.snapshot().revision());
+
+        final PlayerHandoffCodec.Fetch fetch = PlayerHandoffCodec.decodeFetch(PlayerHandoffCodec.encodeFetch(
+            new PlayerHandoffCodec.Fetch(playerId, "backend-b")
+        ));
+        assertEquals(playerId, fetch.playerId());
+        assertEquals("backend-b", fetch.targetBackendId());
+
+        final PlayerHandoffCodec.FetchResponse fetched = PlayerHandoffCodec.decodeFetchResponse(
+            PlayerHandoffCodec.encodeFetchResponse(new PlayerHandoffCodec.FetchResponse(stage))
+        );
+        assertEquals(42, fetched.stage().snapshot().revision());
+        final PlayerHandoffCodec.FetchResponse absent = PlayerHandoffCodec.decodeFetchResponse(
+            PlayerHandoffCodec.encodeFetchResponse(new PlayerHandoffCodec.FetchResponse(null))
+        );
+        assertEquals(null, absent.stage());
     }
 
     @Test

@@ -104,6 +104,58 @@ public final class PlayerHandoffCodec {
         }
     }
 
+    public static byte[] encodeFetch(final Fetch fetch) throws IOException {
+        final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (DataOutputStream output = new DataOutputStream(bytes)) {
+            writeUuid(output, fetch.playerId());
+            writeString(output, fetch.targetBackendId());
+        }
+        return bytes.toByteArray();
+    }
+
+    public static Fetch decodeFetch(final byte[] payload) throws IOException {
+        try (DataInputStream input = input(payload)) {
+            final Fetch fetch = new Fetch(readUuid(input), readString(input));
+            if (input.available() != 0) {
+                throw new ProtocolException("Trailing player snapshot fetch payload");
+            }
+            return fetch;
+        }
+    }
+
+    public static byte[] encodeFetchResponse(final FetchResponse response) throws IOException {
+        final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (DataOutputStream output = new DataOutputStream(bytes)) {
+            output.writeBoolean(response.stage() != null);
+            if (response.stage() != null) {
+                final byte[] stage = encodeStage(response.stage());
+                output.writeInt(stage.length);
+                output.write(stage);
+            }
+        }
+        return bytes.toByteArray();
+    }
+
+    public static FetchResponse decodeFetchResponse(final byte[] payload) throws IOException {
+        try (DataInputStream input = input(payload)) {
+            final boolean present = input.readBoolean();
+            final Stage stage;
+            if (present) {
+                final int length = input.readInt();
+                if (length < 0 || length > input.available()) {
+                    throw new ProtocolException("Invalid fetched player snapshot length");
+                }
+                stage = decodeStage(input.readNBytes(length));
+            } else {
+                stage = null;
+            }
+            if (input.available() != 0) {
+                throw new ProtocolException("Trailing player snapshot fetch response");
+            }
+            return new FetchResponse(stage);
+        }
+    }
+
     private static DataInputStream input(final byte[] payload) throws ProtocolException {
         if (payload.length > FrameCodec.MAX_PAYLOAD_BYTES) {
             throw new ProtocolException("Player handoff payload exceeds the frame limit");
@@ -161,5 +213,16 @@ public final class PlayerHandoffCodec {
                 throw new IllegalArgumentException("Staged player snapshot fields are required");
             }
         }
+    }
+
+    public record Fetch(UUID playerId, String targetBackendId) {
+        public Fetch {
+            if (playerId == null || targetBackendId == null || targetBackendId.isBlank()) {
+                throw new IllegalArgumentException("Player snapshot fetch fields are required");
+            }
+        }
+    }
+
+    public record FetchResponse(Stage stage) {
     }
 }

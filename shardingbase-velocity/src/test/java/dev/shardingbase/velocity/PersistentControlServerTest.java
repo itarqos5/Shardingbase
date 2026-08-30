@@ -122,6 +122,33 @@ class PersistentControlServerTest {
             );
             assertTrue(staged.accepted());
             assertEquals(prepared.revision(), playerStateStore.load(playerId).orElseThrow().revision());
+
+            try (SSLSocket targetSocket = connect(port)) {
+                final UUID targetAuthenticationId = UUID.randomUUID();
+                FrameCodec.write(targetSocket.getOutputStream(), frame(
+                    "node-b",
+                    MessageType.AUTHENTICATE_NODE_REQUEST,
+                    targetAuthenticationId,
+                    NodeAuthenticationCodec.encodeRequest("credential-b")
+                ));
+                assertTrue(NodeAuthenticationCodec.decodeResponse(
+                    FrameCodec.read(targetSocket.getInputStream()).payload()
+                ).accepted());
+
+                final UUID fetchId = UUID.randomUUID();
+                FrameCodec.write(targetSocket.getOutputStream(), frame(
+                    "node-b",
+                    MessageType.PLAYER_SNAPSHOT_FETCH,
+                    fetchId,
+                    PlayerHandoffCodec.encodeFetch(new PlayerHandoffCodec.Fetch(playerId, "backend-id-b"))
+                ));
+                final ProtocolFrame fetchedFrame = FrameCodec.read(targetSocket.getInputStream());
+                assertEquals(MessageType.PLAYER_SNAPSHOT_FETCH_RESPONSE, fetchedFrame.messageType());
+                final PlayerHandoffCodec.FetchResponse fetched = PlayerHandoffCodec.decodeFetchResponse(
+                    fetchedFrame.payload()
+                );
+                assertEquals(prepared.revision(), fetched.stage().snapshot().revision());
+            }
         }
     }
 
@@ -134,12 +161,21 @@ class PersistentControlServerTest {
     }
 
     private static ProtocolFrame frame(final MessageType type, final UUID correlationId, final byte[] payload) {
+        return frame("node-a", type, correlationId, payload);
+    }
+
+    private static ProtocolFrame frame(
+        final String sourceId,
+        final MessageType type,
+        final UUID correlationId,
+        final byte[] payload
+    ) {
         return new ProtocolFrame(
             ShardingbaseProtocol.VERSION,
             ProtocolChannel.CONTROL,
             type,
             correlationId,
-            "node-a",
+            sourceId,
             "velocity",
             payload
         );
