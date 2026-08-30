@@ -1,5 +1,7 @@
 .gradle/
 build/
+/Shardingbase.jar
+/Shardingbase-backend.jar
 
 # Eclipse stuff
 .classpath

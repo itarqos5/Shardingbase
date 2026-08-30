@@ -94,3 +94,30 @@ tasks.register("printPaperVersion") {
         println(paperVersion.get())
     }
 }
+
+val installShardingbaseManager by tasks.registering(Copy::class) {
+    group = "build"
+    description = "Install the self-extracting Shardingbase manager in the project root"
+    doNotTrackState("The project root contains Gradle's live lock files")
+    dependsOn(":shardingbase-node:jar")
+    from(layout.projectDirectory.file("shardingbase-node/build/libs/Shardingbase-Node.jar"))
+    into(layout.projectDirectory)
+    rename { "Shardingbase.jar" }
+}
+
+val assembleShardingbaseRelease by tasks.registering(Sync::class) {
+    group = "build"
+    description = "Assemble the Shardingbase server, Velocity, and node test artifacts"
+    dependsOn(
+        ":paper-server:createShardingbaseJar",
+        ":shardingbase-velocity:jar",
+        ":shardingbase-node:jar",
+        installShardingbaseManager,
+    )
+    into(layout.buildDirectory.dir("release"))
+    from(layout.projectDirectory.file("paper-server/build/libs/Shardingbase.jar")) {
+        rename { "Shardingbase-server.jar" }
+    }
+    from(layout.projectDirectory.file("shardingbase-velocity/build/libs/Shardingbase-Velocity.jar"))
+    from(layout.projectDirectory.file("shardingbase-node/build/libs/Shardingbase-Node.jar"))
+}

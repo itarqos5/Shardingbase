@@ -45,6 +45,18 @@ be assembled with:
 ./gradlew :shardingbase-node:build :shardingbase-velocity:build
 ```
 
+To create the complete test layout, run:
+
+```bash
+./gradlew assembleShardingbaseRelease
+```
+
+This produces `Shardingbase-server.jar`, `Shardingbase-Velocity.jar`, and
+`Shardingbase-Node.jar` in `build/release/`. It also installs the manager as
+`Shardingbase.jar` in the project root. The manager contains the server JAR as
+an embedded resource. Starting it exports that resource beside the manager as
+`Shardingbase-backend.jar`; it does not launch the backend.
+
 Run the focused checks with:
 
 ```bash
