@@ -164,6 +164,8 @@ tasks.jar {
     manifest {
         val git = Git(rootProject.layout.projectDirectory.path)
         val mcVersion = rootProject.providers.gradleProperty("mcVersion").get()
+        val paperCompatibilityBuild = rootProject.providers.gradleProperty("paperCompatibilityBuild").get()
+        val paperCompatibilityCommit = rootProject.providers.gradleProperty("paperCompatibilityCommit").get()
         val build = System.getenv("BUILD_NUMBER") ?: null
         val buildTime = providers.environmentVariable("BUILD_STARTED_AT").map(Instant::parse).orElse(Instant.EPOCH).get()
         val gitHash = git.exec(providers, "rev-parse", "--short=7", "HEAD").get().trim()
@@ -180,6 +182,8 @@ tasks.jar {
             "Specification-Vendor" to "Shardingbase Contributors",
             "Brand-Id" to "shardingbase:shardingbase",
             "Brand-Name" to "Shardingbase",
+            "Paper-Compatibility-Build" to paperCompatibilityBuild,
+            "Paper-Compatibility-Commit" to paperCompatibilityCommit,
             "Build-Number" to (build ?: ""),
             "Build-Time" to buildTime.toString(),
             "Git-Branch" to gitBranch,
@@ -234,7 +238,11 @@ tasks.jar {
 }
 
 tasks.test {
-    include("**/**TestSuite.class", "**/shardingbase/**/*Test.class")
+    include(
+        "**/**TestSuite.class",
+        "**/shardingbase/**/*Test.class",
+        "**/PaperCompatibilityVersionTest.class",
+    )
     workingDir = temporaryDir
     useJUnitPlatform {
         forkEvery = 1
