@@ -95,11 +95,11 @@ tasks.register("printPaperVersion") {
     }
 }
 
-val installShardingbaseBackend by tasks.registering {
+val installShardingbaseManager by tasks.registering {
     group = "build"
-    description = "Install the standalone Shardingbase backend in the project root"
-    dependsOn(":paper-server:createShardingbaseJar")
-    val source = layout.projectDirectory.file("paper-server/build/libs/Shardingbase.jar")
+    description = "Install the self-contained Shardingbase node manager in the project root"
+    dependsOn(":shardingbase-node:jar")
+    val source = layout.projectDirectory.file("shardingbase-node/build/libs/Shardingbase-Node.jar")
     val target = layout.projectDirectory.file("Shardingbase.jar")
     inputs.file(source)
     outputs.file(target)
@@ -119,10 +119,12 @@ val assembleShardingbaseRelease by tasks.registering(Sync::class) {
         ":paper-server:createShardingbaseJar",
         ":shardingbase-velocity:jar",
         ":shardingbase-node:jar",
-        installShardingbaseBackend,
+        installShardingbaseManager,
     )
     into(layout.buildDirectory.dir("release"))
-    from(layout.projectDirectory.file("paper-server/build/libs/Shardingbase.jar"))
+    from(layout.projectDirectory.file("paper-server/build/libs/Shardingbase.jar")) {
+        rename { "Shardingbase-server.jar" }
+    }
     from(layout.projectDirectory.file("shardingbase-velocity/build/libs/Shardingbase-Velocity.jar"))
     from(layout.projectDirectory.file("shardingbase-node/build/libs/Shardingbase-Node.jar"))
 }
