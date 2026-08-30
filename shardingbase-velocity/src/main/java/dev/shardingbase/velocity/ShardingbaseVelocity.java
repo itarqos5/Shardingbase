@@ -182,7 +182,7 @@ public final class ShardingbaseVelocity {
                 this.proxy, this.logger, configuration, tlsMaterial, registry, playerStateStore, worldPlannerStore
             );
             this.worldTransactions = new VelocityWorldTransactionCoordinator(
-                configuration, worldPlannerStore, registry, this.controlServer, this.logger
+                this.proxy, configuration, worldPlannerStore, registry, this.controlServer, this.logger
             );
             this.plannerWebServer = new PlannerWebServer(
                 configuration, worldPlannerStore, registry, this.worldTransactions::submit, this.logger

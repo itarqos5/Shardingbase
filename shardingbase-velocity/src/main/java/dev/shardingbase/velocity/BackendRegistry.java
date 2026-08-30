@@ -205,6 +205,22 @@ final class BackendRegistry {
         }
     }
 
+    synchronized long lastSeen(final String serverId) throws IOException {
+        try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement(
+            "SELECT last_seen_epoch_ms FROM backends WHERE server_id = ? LIMIT 1"
+        )) {
+            statement.setString(1, serverId);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    throw new IOException("Backend is not registered: " + serverId);
+                }
+                return result.getLong(1);
+            }
+        } catch (final SQLException exception) {
+            throw new IOException("SQLite backend health lookup failed", exception);
+        }
+    }
+
     synchronized void setPairStatus(
         final List<String> serverIds,
         final String status,
@@ -237,6 +253,50 @@ final class BackendRegistry {
             }
         } catch (final SQLException exception) {
             throw new IOException("Unable to update backend maintenance state", exception);
+        }
+    }
+
+    synchronized void clearPairHealth(final List<String> serverIds) throws IOException {
+        if (serverIds.size() != 2 || serverIds.get(0).equals(serverIds.get(1))) {
+            throw new IllegalArgumentException("Exactly two distinct backend IDs are required");
+        }
+        try (Connection connection = this.connection()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement statement = connection.prepareStatement(
+                "UPDATE backends SET last_seen_epoch_ms = 0 WHERE server_id = ?"
+            )) {
+                int updated = 0;
+                for (final String serverId : serverIds) {
+                    statement.setString(1, serverId);
+                    updated += statement.executeUpdate();
+                }
+                if (updated != 2) {
+                    connection.rollback();
+                    throw new IOException("Both backends must be registered before clearing health");
+                }
+                connection.commit();
+            } catch (final SQLException | IOException exception) {
+                connection.rollback();
+                throw exception;
+            }
+        } catch (final SQLException exception) {
+            throw new IOException("Unable to clear backend health state", exception);
+        }
+    }
+
+    synchronized void clearHealth(final String serverId) throws IOException {
+        if (serverId == null || serverId.isBlank()) {
+            throw new IllegalArgumentException("Backend ID is required");
+        }
+        try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement(
+            "UPDATE backends SET last_seen_epoch_ms = 0 WHERE server_id = ?"
+        )) {
+            statement.setString(1, serverId);
+            if (statement.executeUpdate() != 1) {
+                throw new IOException("Backend health reset did not match exactly one backend");
+            }
+        } catch (final SQLException exception) {
+            throw new IOException("Unable to clear backend health", exception);
         }
     }
 

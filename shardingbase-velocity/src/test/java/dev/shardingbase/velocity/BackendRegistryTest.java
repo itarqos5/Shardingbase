@@ -33,6 +33,13 @@ class BackendRegistryTest {
         assertEquals("world cut", registry.statusForName("backend-b").orElseThrow().detail());
         assertTrue(registry.register("node-a", request("id-a", "backend-a", "26.2", "build-a")).accepted());
         assertTrue(registry.statusForName("backend-a").orElseThrow().maintenance());
+        assertTrue(registry.lastSeen("id-a") > 0L);
+        assertTrue(registry.lastSeen("id-b") > 0L);
+        registry.clearHealth("id-a");
+        assertEquals(0L, registry.lastSeen("id-a"));
+        assertTrue(registry.lastSeen("id-b") > 0L);
+        assertTrue(registry.register("node-a", request("id-a", "backend-a", "26.2", "build-a")).accepted());
+        assertTrue(registry.lastSeen("id-a") > 0L);
         registry.setPairStatus(java.util.List.of("id-a", "id-b"), "ONLINE", "transaction complete");
         assertFalse(registry.statusForName("backend-a").orElseThrow().maintenance());
         assertTrue(registry.nodeIdForTarget("missing").isEmpty());

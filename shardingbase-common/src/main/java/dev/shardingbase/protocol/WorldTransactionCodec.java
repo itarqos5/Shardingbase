@@ -255,7 +255,8 @@ public final class WorldTransactionCodec {
         RELAY_TARGET,
         INSTALL_TARGET,
         COMMIT_SOURCE,
-        ROLLBACK
+        ROLLBACK,
+        COMPLETE
     }
 
     public enum Outcome {

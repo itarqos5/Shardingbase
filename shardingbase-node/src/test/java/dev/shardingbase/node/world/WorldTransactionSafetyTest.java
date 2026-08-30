@@ -18,6 +18,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WorldTransactionSafetyTest {
     @Test
+    void completedJournalIsTerminal(@TempDir final Path directory) throws Exception {
+        final UUID transactionId = UUID.randomUUID();
+        final Path path = directory.resolve("journal.properties");
+        final WorldTransactionJournal journal = WorldTransactionJournal.create(path, transactionId);
+        journal.advance(TransactionPhase.AUTHORIZED);
+        journal.advance(TransactionPhase.BACKEND_STOPPED);
+        journal.advance(TransactionPhase.BACKUP_COMPLETE);
+        journal.advance(TransactionPhase.TARGET_PREPARED);
+        journal.advance(TransactionPhase.SOURCE_COMMITTED);
+        journal.advance(TransactionPhase.STARTING_TARGET);
+        journal.advance(TransactionPhase.STARTING_SOURCE);
+        journal.advance(TransactionPhase.COMPLETE);
+
+        assertThrows(IOException.class, () -> journal.advance(TransactionPhase.ROLLED_BACK));
+        assertEquals(TransactionPhase.COMPLETE, WorldTransactionJournal.load(path).phase());
+    }
+
+    @Test
     void refusesMismatchedDualAuthorization() {
         final UUID transactionId = UUID.randomUUID();
         assertThrows(IOException.class, () -> TransactionAuthorization.requireMatching(
