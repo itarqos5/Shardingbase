@@ -70,8 +70,19 @@ public final class WorldMapCoordinator implements AutoCloseable {
                     MessageType.MAP_SESSION_CREATE,
                     "velocity",
                     MapPlannerCodec.encodeCreate(new MapPlannerCodec.Create(
-                        sessionId, this.backendId, world.getKey().toString(), scan.minChunkX(), scan.maxChunkX(),
-                        scan.minChunkZ(), scan.maxChunkZ(), scan.chunks().size(), scan.estimatedBytes()
+                        sessionId,
+                        this.backendId,
+                        world.getKey().toString(),
+                        world.getWorldFolder().getName(),
+                        world.getUID(),
+                        world.getSeed(),
+                        org.bukkit.Bukkit.getUnsafe().getDataVersion(),
+                        scan.minChunkX(),
+                        scan.maxChunkX(),
+                        scan.minChunkZ(),
+                        scan.maxChunkZ(),
+                        scan.chunks().size(),
+                        scan.estimatedBytes()
                     ))
                 );
                 if (response.messageType() != MessageType.MAP_SESSION_CREATED) {

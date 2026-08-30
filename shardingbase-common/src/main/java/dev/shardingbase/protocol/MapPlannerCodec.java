@@ -23,6 +23,10 @@ public final class MapPlannerCodec {
             writeUuid(output, request.sessionId());
             writeString(output, request.backendId());
             writeString(output, request.worldKey());
+            writeString(output, request.worldDirectory());
+            writeUuid(output, request.worldId());
+            output.writeLong(request.worldSeed());
+            output.writeInt(request.dataVersion());
             output.writeInt(request.minChunkX());
             output.writeInt(request.maxChunkX());
             output.writeInt(request.minChunkZ());
@@ -34,8 +38,9 @@ public final class MapPlannerCodec {
 
     public static Create decodeCreate(final byte[] payload) throws IOException {
         return decode(payload, input -> new Create(
-            readUuid(input), readString(input), readString(input), input.readInt(), input.readInt(),
-            input.readInt(), input.readInt(), input.readLong(), input.readLong()
+            readUuid(input), readString(input), readString(input), readString(input), readUuid(input),
+            input.readLong(), input.readInt(), input.readInt(), input.readInt(), input.readInt(), input.readInt(),
+            input.readLong(), input.readLong()
         ));
     }
 
@@ -153,6 +158,10 @@ public final class MapPlannerCodec {
         UUID sessionId,
         String backendId,
         String worldKey,
+        String worldDirectory,
+        UUID worldId,
+        long worldSeed,
+        int dataVersion,
         int minChunkX,
         int maxChunkX,
         int minChunkZ,
@@ -162,6 +171,8 @@ public final class MapPlannerCodec {
     ) {
         public Create {
             if (sessionId == null || backendId == null || backendId.isBlank() || worldKey == null || worldKey.isBlank()
+                || worldDirectory == null || !worldDirectory.matches("[A-Za-z0-9._-]{1,255}")
+                || worldId == null || dataVersion < 1
                 || minChunkX > maxChunkX || minChunkZ > maxChunkZ || generatedChunks < 1 || estimatedBytes < 0) {
                 throw new IllegalArgumentException("Invalid map planner session");
             }

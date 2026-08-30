@@ -29,6 +29,10 @@ final class WorldPlannerStore {
                     session_id TEXT PRIMARY KEY NOT NULL,
                     backend_id TEXT NOT NULL,
                     world_key TEXT NOT NULL,
+                    world_directory TEXT NOT NULL,
+                    world_id TEXT NOT NULL,
+                    world_seed INTEGER NOT NULL,
+                    data_version INTEGER NOT NULL,
                     min_chunk_x INTEGER NOT NULL,
                     max_chunk_x INTEGER NOT NULL,
                     min_chunk_z INTEGER NOT NULL,
@@ -41,6 +45,12 @@ final class WorldPlannerStore {
                     created_epoch_ms INTEGER NOT NULL
                 )
                 """);
+            ensureColumn(connection, "map_sessions", "world_directory",
+                "TEXT NOT NULL DEFAULT 'world'");
+            ensureColumn(connection, "map_sessions", "world_id",
+                "TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000'");
+            ensureColumn(connection, "map_sessions", "world_seed", "INTEGER NOT NULL DEFAULT 0");
+            ensureColumn(connection, "map_sessions", "data_version", "INTEGER NOT NULL DEFAULT 1");
             connection.createStatement().executeUpdate("""
                 CREATE TABLE IF NOT EXISTS map_tiles (
                     session_id TEXT NOT NULL,
@@ -71,20 +81,25 @@ final class WorldPlannerStore {
     synchronized void create(final MapPlannerCodec.Create session) throws IOException {
         try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement("""
             INSERT INTO map_sessions (
-                session_id, backend_id, world_key, min_chunk_x, max_chunk_x, min_chunk_z, max_chunk_z,
-                generated_chunks, estimated_bytes, state, created_epoch_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'UPLOADING', ?)
+                session_id, backend_id, world_key, world_directory, world_id, world_seed, data_version,
+                min_chunk_x, max_chunk_x, min_chunk_z, max_chunk_z, generated_chunks, estimated_bytes,
+                state, created_epoch_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'UPLOADING', ?)
             """)) {
             statement.setString(1, session.sessionId().toString());
             statement.setString(2, session.backendId());
             statement.setString(3, session.worldKey());
-            statement.setInt(4, session.minChunkX());
-            statement.setInt(5, session.maxChunkX());
-            statement.setInt(6, session.minChunkZ());
-            statement.setInt(7, session.maxChunkZ());
-            statement.setLong(8, session.generatedChunks());
-            statement.setLong(9, session.estimatedBytes());
-            statement.setLong(10, System.currentTimeMillis());
+            statement.setString(4, session.worldDirectory());
+            statement.setString(5, session.worldId().toString());
+            statement.setLong(6, session.worldSeed());
+            statement.setInt(7, session.dataVersion());
+            statement.setInt(8, session.minChunkX());
+            statement.setInt(9, session.maxChunkX());
+            statement.setInt(10, session.minChunkZ());
+            statement.setInt(11, session.maxChunkZ());
+            statement.setLong(12, session.generatedChunks());
+            statement.setLong(13, session.estimatedBytes());
+            statement.setLong(14, System.currentTimeMillis());
             statement.executeUpdate();
         } catch (final SQLException exception) {
             throw new IOException("Unable to create map session", exception);
@@ -294,6 +309,27 @@ final class WorldPlannerStore {
         return connection;
     }
 
+    private static void ensureColumn(
+        final Connection connection,
+        final String table,
+        final String column,
+        final String declaration
+    ) throws SQLException {
+        try (
+            PreparedStatement statement = connection.prepareStatement("PRAGMA table_info(" + table + ")");
+            ResultSet result = statement.executeQuery()
+        ) {
+            while (result.next()) {
+                if (column.equals(result.getString("name"))) {
+                    return;
+                }
+            }
+        }
+        try (var statement = connection.createStatement()) {
+            statement.executeUpdate("ALTER TABLE " + table + " ADD COLUMN " + column + ' ' + declaration);
+        }
+    }
+
     private String token() {
         final byte[] bytes = new byte[32];
         this.random.nextBytes(bytes);
@@ -313,6 +349,10 @@ final class WorldPlannerStore {
             UUID.fromString(result.getString("session_id")),
             result.getString("backend_id"),
             result.getString("world_key"),
+            result.getString("world_directory"),
+            UUID.fromString(result.getString("world_id")),
+            result.getLong("world_seed"),
+            result.getInt("data_version"),
             result.getInt("min_chunk_x"),
             result.getInt("max_chunk_x"),
             result.getInt("min_chunk_z"),
@@ -327,6 +367,10 @@ final class WorldPlannerStore {
         UUID sessionId,
         String backendId,
         String worldKey,
+        String worldDirectory,
+        UUID worldId,
+        long worldSeed,
+        int dataVersion,
         int minChunkX,
         int maxChunkX,
         int minChunkZ,
