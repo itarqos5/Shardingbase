@@ -29,15 +29,18 @@ final class PlannerWebServer implements AutoCloseable {
     private final HttpServer server;
     private final ThreadPoolExecutor clients;
     private final boolean secureCookie;
+    private final java.util.function.Consumer<UUID> transactionStarter;
 
     PlannerWebServer(
         final VelocityConfiguration configuration,
         final WorldPlannerStore store,
         final BackendRegistry registry,
+        final java.util.function.Consumer<UUID> transactionStarter,
         final Logger logger
     ) throws IOException {
         this.store = store;
         this.registry = registry;
+        this.transactionStarter = transactionStarter;
         this.logger = logger;
         this.secureCookie = configuration.webPublicUrl().startsWith("https://");
         this.server = HttpServer.create(new InetSocketAddress(
@@ -224,8 +227,9 @@ final class PlannerWebServer implements AutoCloseable {
             negative,
             positive
         );
+        this.transactionStarter.accept(transactionId);
         send(exchange, 201, "text/html; charset=utf-8", "<h1>Plan created</h1><p>Transaction <code>"
-            + transactionId + "</code> is immutable and awaiting preflight.</p>");
+            + transactionId + "</code> is immutable and preflight has started.</p>");
     }
 
     private static Map<String, String> form(final String body) {

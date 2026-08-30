@@ -33,6 +33,10 @@ class WorldPlannerStoreTest {
             redeemed.session(), "X", 4, "backend-a", "backend-b"
         );
         assertTrue(transactionId.toString().length() > 30);
+        assertEquals("PLANNED", store.transaction(transactionId).orElseThrow().state());
+        store.transition(transactionId, "PLANNED", "PREFLIGHTING", "checking nodes");
+        assertEquals("PREFLIGHTING", store.transaction(transactionId).orElseThrow().state());
+        assertEquals(1, store.transactionsIn("PREFLIGHTING").size());
         assertThrows(Exception.class, () -> store.confirm(
             redeemed.session(), "Z", 2, "backend-b", "backend-a"
         ));

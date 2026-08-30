@@ -18,6 +18,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import net.minecraft.server.MinecraftServer;
+import org.bukkit.Bukkit;
+import org.bukkit.NamespacedKey;
+import org.bukkit.World;
 
 /** Saves and flushes the local server before authorizing its node's offline work. */
 public final class WorldTransactionCoordinator implements AutoCloseable {
@@ -86,6 +89,11 @@ public final class WorldTransactionCoordinator implements AutoCloseable {
         }
         executor.execute(() -> {
             try {
+                final String rejection = this.worldIdentityRejection(request);
+                if (rejection != null) {
+                    this.respond(request, Outcome.REJECTED, rejection);
+                    return;
+                }
                 final boolean saved = MinecraftServer.getServer().saveEverything(false, true, true);
                 this.respond(
                     request,
@@ -99,6 +107,30 @@ public final class WorldTransactionCoordinator implements AutoCloseable {
                 this.respond(request, Outcome.FAILED, safeMessage(exception));
             }
         });
+    }
+
+    private String worldIdentityRejection(final Request request) {
+        final var manifest = request.signedManifest().manifest();
+        if (Bukkit.getUnsafe().getDataVersion() != manifest.dataVersion()) {
+            return "world data version does not match the signed transaction manifest";
+        }
+        final NamespacedKey key = NamespacedKey.fromString(manifest.worldKey());
+        final World world = key == null ? null : Bukkit.getWorld(key);
+        if (world == null) {
+            return this.backendId.equals(manifest.targetBackendId())
+                ? null
+                : "source world is not loaded";
+        }
+        if (!world.getWorldFolder().getName().equals(manifest.worldDirectory())) {
+            return "loaded world directory does not match the signed transaction manifest";
+        }
+        if (!world.getUID().equals(manifest.worldId())) {
+            return "loaded world UUID does not match the signed transaction manifest";
+        }
+        if (world.getSeed() != manifest.worldSeed()) {
+            return "loaded world seed does not match the signed transaction manifest";
+        }
+        return null;
     }
 
     private void respond(final Request request, final Outcome outcome, final String detail) {

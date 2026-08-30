@@ -40,6 +40,7 @@ public final class ShardingbaseVelocity {
     private volatile BackendRegistry backendRegistry;
     private volatile Set<String> remoteCommandAllowlist = Set.of();
     private volatile PlannerWebServer plannerWebServer;
+    private volatile VelocityWorldTransactionCoordinator worldTransactions;
 
     @Inject
     public ShardingbaseVelocity(
@@ -59,6 +60,14 @@ public final class ShardingbaseVelocity {
 
     @Subscribe
     public void onProxyShutdown(final ProxyShutdownEvent event) {
+        final PlannerWebServer planner = this.plannerWebServer;
+        if (planner != null) {
+            planner.close();
+        }
+        final VelocityWorldTransactionCoordinator transactions = this.worldTransactions;
+        if (transactions != null) {
+            transactions.close();
+        }
         final ControlServer current = this.controlServer;
         if (current != null) {
             try {
@@ -66,10 +75,6 @@ public final class ShardingbaseVelocity {
             } catch (final IOException exception) {
                 this.logger.warn("Unable to close the Shardingbase control listener cleanly", exception);
             }
-        }
-        final PlannerWebServer planner = this.plannerWebServer;
-        if (planner != null) {
-            planner.close();
         }
     }
 
@@ -173,9 +178,14 @@ public final class ShardingbaseVelocity {
             final BackendRegistry registry = new BackendRegistry(configuration.databasePath());
             final PlayerStateStore playerStateStore = new PlayerStateStore(configuration.databasePath());
             final WorldPlannerStore worldPlannerStore = new WorldPlannerStore(configuration.databasePath());
-            this.plannerWebServer = new PlannerWebServer(configuration, worldPlannerStore, registry, this.logger);
             this.controlServer = new ControlServer(
                 this.proxy, this.logger, configuration, tlsMaterial, registry, playerStateStore, worldPlannerStore
+            );
+            this.worldTransactions = new VelocityWorldTransactionCoordinator(
+                configuration, worldPlannerStore, registry, this.controlServer, this.logger
+            );
+            this.plannerWebServer = new PlannerWebServer(
+                configuration, worldPlannerStore, registry, this.worldTransactions::submit, this.logger
             );
             this.backendRegistry = registry;
             this.remoteCommandAllowlist = configuration.remoteCommandAllowlist();

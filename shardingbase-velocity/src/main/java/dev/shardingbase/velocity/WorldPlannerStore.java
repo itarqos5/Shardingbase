@@ -70,9 +70,13 @@ final class WorldPlannerStore {
                     negative_backend_id TEXT NOT NULL,
                     positive_backend_id TEXT NOT NULL,
                     state TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    updated_epoch_ms INTEGER NOT NULL,
                     created_epoch_ms INTEGER NOT NULL
                 )
                 """);
+            ensureColumn(connection, "world_transactions", "detail", "TEXT NOT NULL DEFAULT ''");
+            ensureColumn(connection, "world_transactions", "updated_epoch_ms", "INTEGER NOT NULL DEFAULT 0");
         } catch (final SQLException exception) {
             throw new IOException("Unable to initialize world planner storage", exception);
         }
@@ -270,8 +274,8 @@ final class WorldPlannerStore {
             try (PreparedStatement insert = connection.prepareStatement("""
                 INSERT INTO world_transactions (
                     transaction_id, session_id, axis, cut_chunk, negative_backend_id, positive_backend_id,
-                    state, created_epoch_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, 'PLANNED', ?)
+                    state, detail, updated_epoch_ms, created_epoch_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, 'PLANNED', 'awaiting preflight', ?, ?)
                 """)) {
                 insert.setString(1, transactionId.toString());
                 insert.setString(2, session.sessionId().toString());
@@ -279,7 +283,9 @@ final class WorldPlannerStore {
                 insert.setInt(4, cutChunk);
                 insert.setString(5, negativeBackendId);
                 insert.setString(6, positiveBackendId);
-                insert.setLong(7, System.currentTimeMillis());
+                final long now = System.currentTimeMillis();
+                insert.setLong(7, now);
+                insert.setLong(8, now);
                 insert.executeUpdate();
             }
             try (PreparedStatement update = connection.prepareStatement(
@@ -295,6 +301,87 @@ final class WorldPlannerStore {
             return transactionId;
         } catch (final SQLException exception) {
             throw new IOException("Unable to persist immutable world transaction plan", exception);
+        }
+    }
+
+    synchronized Optional<TransactionPlan> transaction(final UUID transactionId) throws IOException {
+        try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement("""
+            SELECT
+                wt.transaction_id, wt.axis, wt.cut_chunk, wt.negative_backend_id, wt.positive_backend_id,
+                wt.state AS transaction_state, wt.detail AS transaction_detail,
+                ms.session_id, ms.backend_id, ms.world_key, ms.world_directory, ms.world_id, ms.world_seed,
+                ms.data_version, ms.min_chunk_x, ms.max_chunk_x, ms.min_chunk_z, ms.max_chunk_z,
+                ms.generated_chunks, ms.estimated_bytes, ms.state AS map_state
+            FROM world_transactions wt
+            JOIN map_sessions ms ON ms.session_id = wt.session_id
+            WHERE wt.transaction_id = ?
+            """)) {
+            statement.setString(1, transactionId.toString());
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? Optional.of(transactionPlan(result)) : Optional.empty();
+            }
+        } catch (final SQLException exception) {
+            throw new IOException("Unable to load world transaction plan", exception);
+        }
+    }
+
+    synchronized List<TransactionPlan> transactionsIn(final String... states) throws IOException {
+        if (states.length == 0) {
+            return List.of();
+        }
+        final String placeholders = String.join(",", java.util.Collections.nCopies(states.length, "?"));
+        final String sql = """
+            SELECT
+                wt.transaction_id, wt.axis, wt.cut_chunk, wt.negative_backend_id, wt.positive_backend_id,
+                wt.state AS transaction_state, wt.detail AS transaction_detail,
+                ms.session_id, ms.backend_id, ms.world_key, ms.world_directory, ms.world_id, ms.world_seed,
+                ms.data_version, ms.min_chunk_x, ms.max_chunk_x, ms.min_chunk_z, ms.max_chunk_z,
+                ms.generated_chunks, ms.estimated_bytes, ms.state AS map_state
+            FROM world_transactions wt
+            JOIN map_sessions ms ON ms.session_id = wt.session_id
+            WHERE wt.state IN (%s)
+            ORDER BY wt.created_epoch_ms
+            """.formatted(placeholders);
+        try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            for (int index = 0; index < states.length; index++) {
+                statement.setString(index + 1, states[index]);
+            }
+            try (ResultSet result = statement.executeQuery()) {
+                final List<TransactionPlan> plans = new ArrayList<>();
+                while (result.next()) {
+                    plans.add(transactionPlan(result));
+                }
+                return List.copyOf(plans);
+            }
+        } catch (final SQLException exception) {
+            throw new IOException("Unable to list recoverable world transactions", exception);
+        }
+    }
+
+    synchronized void transition(
+        final UUID transactionId,
+        final String expectedState,
+        final String nextState,
+        final String detail
+    ) throws IOException {
+        if (expectedState == null || nextState == null || detail == null || detail.isBlank()) {
+            throw new IllegalArgumentException("Transaction transition fields are required");
+        }
+        try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement("""
+            UPDATE world_transactions
+            SET state = ?, detail = ?, updated_epoch_ms = ?
+            WHERE transaction_id = ? AND state = ?
+            """)) {
+            statement.setString(1, nextState);
+            statement.setString(2, detail);
+            statement.setLong(3, System.currentTimeMillis());
+            statement.setString(4, transactionId.toString());
+            statement.setString(5, expectedState);
+            if (statement.executeUpdate() != 1) {
+                throw new IOException("World transaction is no longer in expected state " + expectedState);
+            }
+        } catch (final SQLException exception) {
+            throw new IOException("Unable to persist world transaction phase", exception);
         }
     }
 
@@ -363,6 +450,35 @@ final class WorldPlannerStore {
         );
     }
 
+    private static TransactionPlan transactionPlan(final ResultSet result) throws SQLException {
+        final Session session = new Session(
+            UUID.fromString(result.getString("session_id")),
+            result.getString("backend_id"),
+            result.getString("world_key"),
+            result.getString("world_directory"),
+            UUID.fromString(result.getString("world_id")),
+            result.getLong("world_seed"),
+            result.getInt("data_version"),
+            result.getInt("min_chunk_x"),
+            result.getInt("max_chunk_x"),
+            result.getInt("min_chunk_z"),
+            result.getInt("max_chunk_z"),
+            result.getLong("generated_chunks"),
+            result.getLong("estimated_bytes"),
+            result.getString("map_state")
+        );
+        return new TransactionPlan(
+            UUID.fromString(result.getString("transaction_id")),
+            session,
+            result.getString("axis"),
+            result.getInt("cut_chunk"),
+            result.getString("negative_backend_id"),
+            result.getString("positive_backend_id"),
+            result.getString("transaction_state"),
+            result.getString("transaction_detail")
+        );
+    }
+
     record Session(
         UUID sessionId,
         String backendId,
@@ -382,6 +498,18 @@ final class WorldPlannerStore {
     }
 
     record Redeemed(Session session, String browserToken) {
+    }
+
+    record TransactionPlan(
+        UUID transactionId,
+        Session session,
+        String axis,
+        int cutChunk,
+        String negativeBackendId,
+        String positiveBackendId,
+        String state,
+        String detail
+    ) {
     }
 
     record TileCoordinate(int x, int z) {
