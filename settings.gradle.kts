@@ -13,28 +13,32 @@ if (!file(".git").exists()) {
     val errorText = """
 
         =====================[ ERROR ]=====================
-         The Paper project directory is not a properly cloned Git repository.
+         The Shardingbase project directory is not a properly cloned Git repository.
 
-         In order to build Paper from source you must clone
-         the Paper repository using Git, not download a code
+         In order to build Shardingbase from source you must clone
+         the Shardingbase repository using Git, not download a code
          zip from GitHub.
 
-         Built Paper jars are available for download at
-         https://papermc.io/downloads/paper
+         Clone Shardingbase from
+         https://github.com/itarqos5/Shardingbase
 
          See https://github.com/PaperMC/Paper/blob/main/CONTRIBUTING.md
-         for further information on building and modifying Paper.
+         for upstream information on building and modifying Paper forks.
         ===================================================
     """.trimIndent()
     error(errorText)
 }
 
-rootProject.name = "paper"
+rootProject.name = "shardingbase"
 
 for (name in listOf("paper-api", "paper-server")) {
     include(name)
     file(name).mkdirs()
 }
+
+include("shardingbase-common")
+include("shardingbase-velocity")
+include("shardingbase-node")
 
 include("paper-checkstyle")
 

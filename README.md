@@ -1,41 +1,72 @@
-Paper [![Version](https://img.shields.io/maven-metadata/v?metadataUrl=https%3A%2F%2Fartifactory.papermc.io%2Fartifactory%2Funiverse%2Fio%2Fpapermc%2Fpaper%2Fpaper-api%2Fmaven-metadata.xml&strategy=highestVersion&filter=26.2.*&label=version&color=%23344ceb
-)](https://papermc.io/downloads/paper)
-[![Paper Build Status](https://img.shields.io/github/actions/workflow/status/PaperMC/Paper/build.yml?branch=main)](https://github.com/PaperMC/Paper/actions)
-[![Discord](https://img.shields.io/discord/289587909051416579.svg?label=&logo=discord&logoColor=ffffff&color=7389D8&labelColor=6A7EC2)](https://discord.gg/papermc)
-[![GitHub Sponsors](https://img.shields.io/github/sponsors/papermc?label=GitHub%20Sponsors)](https://github.com/sponsors/PaperMC)
-[![Open Collective](https://img.shields.io/opencollective/all/papermc?label=OpenCollective%20Sponsors)](https://opencollective.com/papermc)
-===========
+# Shardingbase
 
-The most widely used, high-performance Minecraft server that aims to fix gameplay and mechanics inconsistencies.
+[![Build status](https://img.shields.io/github/actions/workflow/status/itarqos5/Shardingbase/build.yml?branch=main&label=build)](https://github.com/itarqos5/Shardingbase/actions)
+[![Upstream](https://img.shields.io/badge/upstream-Paper-344ceb)](https://github.com/PaperMC/Paper)
 
+Shardingbase is an experimental [Paper](https://papermc.io/) fork that keeps
+Paper API compatibility while providing a foundation for shard-aware Minecraft
+server networks.
 
-**Support and Project Discussion:**
-- [Our forums](https://forums.papermc.io/) or [Discord](https://discord.gg/papermc)
+The project is in early development. The current prototype establishes a
+distinct server identity, a versioned shared protocol, a backend node process,
+and a Velocity controller plugin. It is not yet a production-ready sharding
+implementation.
 
-How To (Server Admins)
-------
-Paperclip is a jar file that you can download and run just like a normal jar file.
+## Components
 
-Download Paper from our [downloads page](https://papermc.io/downloads/paper).
+- `paper-api` and `paper-server` — the Paper-compatible API and Shardingbase
+  server runtime.
+- `shardingbase-common` — protocol identifiers shared by Shardingbase
+  processes.
+- `shardingbase-node` — the backend supervisor/transaction-agent entry point.
+- `shardingbase-velocity` — the Velocity-side network controller.
 
-Run the Paperclip jar directly from your server. Just like old times.
+## Building
 
-* Documentation on using Paper: [docs.papermc.io](https://docs.papermc.io)
-* For a sneak peek at upcoming features, [see here](https://github.com/PaperMC/Paper/projects)
+Building requires JDK 25 and an internet connection.
 
-How To (Plugin Developers)
-------
-* See our API [here](paper-api)
-* See upcoming, pending, and recently added API [here](https://github.com/orgs/PaperMC/projects/2/views/4)
-* Paper API javadocs here: [papermc.io/javadocs](https://papermc.io/javadocs/)
-#### Repository (for paper-api)
-See [the docs](https://docs.papermc.io/paper/dev/project-setup/#adding-paper-as-a-dependency) for more details.
-##### Gradle
+On Windows:
+
+```powershell
+.\gradlew.bat :paper-server:createShardingbaseJar
+```
+
+On Linux or macOS:
+
+```bash
+./gradlew :paper-server:createShardingbaseJar
+```
+
+The runnable server is written to
+`paper-server/build/libs/Shardingbase.jar`. The node and Velocity artifacts can
+be assembled with:
+
+```bash
+./gradlew :shardingbase-node:build :shardingbase-velocity:build
+```
+
+Run the focused checks with:
+
+```bash
+./gradlew :shardingbase-common:check :shardingbase-node:check :shardingbase-velocity:check
+```
+
+## Paper compatibility
+
+Shardingbase deliberately retains Paper's API coordinates and reports Paper as
+a compatible brand so existing Paper plugins can continue to recognize the
+server. Paper documentation and API references remain applicable unless a
+Shardingbase-specific document says otherwise:
+
+- [Paper documentation](https://docs.papermc.io/)
+- [Paper API Javadocs](https://jd.papermc.io/paper/)
+- [Paper upstream repository](https://github.com/PaperMC/Paper)
+
+For Gradle projects that target the compatible Paper API:
+
 ```kotlin
 repositories {
-    maven {
-        url = uri("https://repo.papermc.io/repository/maven-public/")
-    }
+    maven("https://repo.papermc.io/repository/maven-public/")
 }
 
 dependencies {
@@ -46,54 +77,13 @@ java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(25))
 }
 ```
-##### Maven
 
-```xml
-<repository>
-    <id>papermc</id>
-    <url>https://repo.papermc.io/repository/maven-public/</url>
-</repository>
-```
+## Upstream attribution
 
-```xml
-<dependency>
-    <groupId>io.papermc.paper</groupId>
-    <artifactId>paper-api</artifactId>
-    <version>[26.2.build,)</version>
-    <scope>provided</scope>
-</dependency>
-```
+Shardingbase is based on Paper and retains Paper's licensing and contributor
+history. Bugs that also occur on an unmodified Paper build should be verified
+against Paper before being reported upstream. Shardingbase-specific behavior
+belongs in this repository.
 
-How To (Compiling Jar From Source)
-------
-To compile Paper, you need JDK 25 and an internet connection.
-
-Clone this repo, run `./gradlew applyPatches`, then `./gradlew createPaperclipJar` from your terminal. You can find the compiled jar in the `paper-server/build/libs` directory.
-
-To get a full list of tasks, run `./gradlew tasks`.
-
-How To (Pull Request)
-------
-See [Contributing](CONTRIBUTING.md)
-
-Old Versions (1.21.3 and below)
-------
-For branches of versions 1.8-1.21.3, please see our [archive repository](https://github.com/PaperMC/Paper-archive).
-
-Support Us
-------
-First of all, thank you for considering helping out, we really appreciate that!
-
-PaperMC has various recurring expenses, mostly related to infrastructure. Paper uses [Open Collective](https://opencollective.com/) via the [Open Source Collective fiscal host](https://opencollective.com/opensource) to manage expenses. Open Collective allows us to be extremely transparent, so you can always see how your donations are used. You can read more about financially supporting PaperMC [on our website](https://papermc.io/sponsors).
-
-You can find our collective [here](https://opencollective.com/papermc), or you can donate via GitHub Sponsors [here](https://github.com/sponsors/PaperMC), which will also go towards the collective.
-
-Special Thanks To:
--------------
-
-[![YourKit-Logo](https://www.yourkit.com/images/yklogo.png)](https://www.yourkit.com/)
-
-[YourKit](https://www.yourkit.com/), makers of the outstanding java profiler, support open source projects of all kinds with their full featured [Java](https://www.yourkit.com/java/profiler) and [.NET](https://www.yourkit.com/.net/profiler) application profilers. We thank them for granting Paper an OSS license so that we can make our software the best it can be.
-
-All our sponsors!  
-[![Sponsor Image](https://raw.githubusercontent.com/PaperMC/papermc.io/data/sponsors.png)](https://papermc.io/sponsors)
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [LICENSE.md](LICENSE.md) for the
+upstream contribution terms and licenses included in this fork.

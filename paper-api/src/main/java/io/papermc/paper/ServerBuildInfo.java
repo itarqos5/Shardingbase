@@ -18,6 +18,14 @@ public interface ServerBuildInfo {
     Key BRAND_PAPER_ID = Key.key("papermc", "paper");
 
     /**
+     * The brand id for Shardingbase.
+     *
+     * <p>Shardingbase retains the Paper API while exposing a distinct runtime
+     * identity so plugins can opt in to shard-aware behavior.</p>
+     */
+    Key BRAND_SHARDINGBASE_ID = Key.key("shardingbase", "shardingbase");
+
+    /**
      * Gets the {@code ServerBuildInfo}.
      *
      * @return the {@code ServerBuildInfo}
