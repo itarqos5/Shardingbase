@@ -19,9 +19,12 @@ import dev.shardingbase.server.validation.ValidationResult;
 import dev.shardingbase.server.player.PlayerStateCoordinator;
 import dev.shardingbase.protocol.PlayerHandoffCodec;
 import dev.shardingbase.protocol.PlayerDataCategory;
+import dev.shardingbase.protocol.RemoteOperationCodec;
+import dev.shardingbase.server.remote.RemoteOperationCoordinator;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ScheduledExecutorService;
@@ -52,10 +55,11 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     private final AtomicLong generation = new AtomicLong();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final PlayerStateCoordinator playerStateCoordinator;
+    private final RemoteOperationCoordinator remoteOperationCoordinator;
     private volatile @Nullable ScheduledFuture<?> retryTask;
     private volatile Runnable menuReloader = () -> {
     };
-    private final RemoteOperations remoteOperations = new DisabledRemoteOperations();
+    private final RemoteOperations remoteOperations;
 
     /**
      * Loads and starts a runtime rooted at the server directory.
@@ -102,6 +106,8 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
             serverDirectory,
             logger
         );
+        this.remoteOperationCoordinator = new RemoteOperationCoordinator(configuration.identity().serverId(), logger);
+        this.remoteOperations = new RoutedRemoteOperations();
         this.shardManifests = new AtomicReference<>(ShardManifestRegistry.load(serverDirectory));
         this.snapshot = new AtomicReference<>(new Snapshot(
             configuration.identity(),
@@ -180,6 +186,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     /** Attaches the server-thread executor used for managed player handoff requests. */
     public void playerExecutor(final java.util.concurrent.Executor playerExecutor) {
         this.playerStateCoordinator.serverExecutor(playerExecutor);
+        this.remoteOperationCoordinator.start(playerExecutor, this::ownership);
     }
 
     /** Starts an asynchronous lookup for state staged for a joining player. */
@@ -306,6 +313,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         }
         this.executor.shutdownNow();
         this.playerStateCoordinator.close();
+        this.remoteOperationCoordinator.close();
         final Snapshot previous = this.snapshot.get();
         this.snapshot.set(new Snapshot(
             previous.identity(),
@@ -340,29 +348,117 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         }
     }
 
-    private final class DisabledRemoteOperations implements RemoteOperations {
+    private final class RoutedRemoteOperations implements RemoteOperations {
         @Override
         public CompletionStage<RemoteResult<BlockSnapshot>> readBlock(final WorldPosition position) {
-            return unavailable();
+            return this.request(
+                RemoteOperationCodec.Operation.READ_BLOCK,
+                position,
+                "",
+                Map.of(),
+                response -> new BlockSnapshot(response.value(), response.properties())
+            );
         }
 
         @Override
         public CompletionStage<RemoteResult<Void>> setBlockData(final WorldPosition position, final String blockData) {
-            return unavailable();
+            if (blockData == null || blockData.isBlank()) {
+                return CompletableFuture.completedFuture(new RemoteResult.ValidationFailure<>("blockData is required"));
+            }
+            return this.request(
+                RemoteOperationCodec.Operation.SET_BLOCK_DATA,
+                position,
+                blockData,
+                Map.of(),
+                response -> null
+            );
         }
 
         @Override
         public CompletionStage<RemoteResult<Boolean>> breakBlock(final WorldPosition position) {
-            return unavailable();
+            return this.request(
+                RemoteOperationCodec.Operation.BREAK_BLOCK,
+                position,
+                "",
+                Map.of(),
+                response -> Boolean.parseBoolean(response.value())
+            );
         }
 
         @Override
         public CompletionStage<RemoteResult<UUID>> spawnEntity(final EntitySpawn spawn) {
-            return unavailable();
+            if (spawn == null || spawn.entityType() == null || spawn.entityType().isBlank()) {
+                return CompletableFuture.completedFuture(new RemoteResult.ValidationFailure<>("entity spawn is required"));
+            }
+            return this.request(
+                RemoteOperationCodec.Operation.SPAWN_ENTITY,
+                spawn.position(),
+                spawn.entityType(),
+                spawn.properties(),
+                response -> UUID.fromString(response.value())
+            );
         }
 
-        private <T> CompletionStage<RemoteResult<T>> unavailable() {
-            return CompletableFuture.completedFuture(new RemoteResult.Unavailable<>(ShardingbaseRuntime.this.statusDetail()));
+        private <T> CompletionStage<RemoteResult<T>> request(
+            final RemoteOperationCodec.Operation operation,
+            final WorldPosition position,
+            final String argument,
+            final Map<String, String> properties,
+            final java.util.function.Function<RemoteOperationCodec.Response, T> decoder
+        ) {
+            if (position == null || position.worldKey() == null || position.worldKey().isBlank()) {
+                return CompletableFuture.completedFuture(new RemoteResult.ValidationFailure<>("world position is required"));
+            }
+            if (ShardingbaseRuntime.this.featureState() != FeatureState.ENABLED
+                || !ShardingbaseRuntime.this.peerStatus().available()) {
+                return CompletableFuture.completedFuture(new RemoteResult.Unavailable<>(
+                    "peer is unavailable: " + ShardingbaseRuntime.this.statusDetail()
+                ));
+            }
+            if (ShardingbaseRuntime.this.ownership(position) != Ownership.REMOTE) {
+                return CompletableFuture.completedFuture(new RemoteResult.ValidationFailure<>(
+                    "position is not owned by the peer shard"
+                ));
+            }
+            final PeerStatus peer = ShardingbaseRuntime.this.peerStatus();
+            final RemoteOperationCodec.Request request = new RemoteOperationCodec.Request(
+                UUID.randomUUID(),
+                ShardingbaseRuntime.this.identity().serverId(),
+                operation,
+                position.worldKey(),
+                position.x(),
+                position.y(),
+                position.z(),
+                argument,
+                properties
+            );
+            return ShardingbaseRuntime.this.remoteOperationCoordinator.request(peer.serverId(), request)
+                .handle((response, failure) -> {
+                    if (failure != null) {
+                        Throwable cause = failure;
+                        while (cause.getCause() != null) {
+                            cause = cause.getCause();
+                        }
+                        if (cause instanceof java.util.concurrent.TimeoutException) {
+                            return new RemoteResult.Timeout<T>(cause.getMessage());
+                        }
+                        return new RemoteResult.Unavailable<T>(safeMessage(
+                            cause instanceof Exception exception ? exception : new Exception(cause)
+                        ));
+                    }
+                    return switch (response.outcome()) {
+                        case SUCCESS -> {
+                            try {
+                                yield new RemoteResult.Success<T>(decoder.apply(response));
+                            } catch (final RuntimeException exception) {
+                                yield new RemoteResult.RemoteFailure<T>("invalid peer response: " + safeMessage(exception));
+                            }
+                        }
+                        case VALIDATION_FAILURE -> new RemoteResult.ValidationFailure<T>(response.detail());
+                        case REMOTE_FAILURE -> new RemoteResult.RemoteFailure<T>(response.detail());
+                    };
+                });
         }
+
     }
 }
