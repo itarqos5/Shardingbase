@@ -1,14 +1,18 @@
 package dev.shardingbase.node;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BackendExtractorTest {
@@ -43,5 +47,16 @@ class BackendExtractorTest {
 
         assertFalse(result.updated());
         assertArrayEquals(backend, Files.readAllBytes(target));
+    }
+
+    @Test
+    void validatesConfiguredBackendFilename() throws Exception {
+        assertEquals("Shardingbase-backend.jar", BackendExtractor.exportedBackendName(Map.of()));
+        assertEquals("custom.jar", BackendExtractor.exportedBackendName(Map.of(
+            BackendExtractor.BACKEND_JAR_ENVIRONMENT, "custom.jar"
+        )));
+        assertThrows(IOException.class, () -> BackendExtractor.exportedBackendName(Map.of(
+            BackendExtractor.BACKEND_JAR_ENVIRONMENT, "../escape.jar"
+        )));
     }
 }

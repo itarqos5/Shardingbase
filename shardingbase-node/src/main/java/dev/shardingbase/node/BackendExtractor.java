@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.CodeSource;
+import java.util.Map;
 
 /**
  * Exports the bundled server without attempting to execute it in-process.
@@ -16,6 +17,7 @@ import java.security.CodeSource;
 final class BackendExtractor {
     static final String EMBEDDED_BACKEND_PATH = "/META-INF/shardingbase/Shardingbase-server.jar";
     static final String EXPORTED_BACKEND_NAME = "Shardingbase-backend.jar";
+    static final String BACKEND_JAR_ENVIRONMENT = "SHARDINGBASE_BACKEND_JAR";
 
     private BackendExtractor() {
     }
@@ -27,8 +29,18 @@ final class BackendExtractor {
         }
 
         try (resource) {
-            return extract(resource, managerDirectory().resolve(EXPORTED_BACKEND_NAME));
+            return extract(resource, managerDirectory().resolve(exportedBackendName(System.getenv())));
         }
+    }
+
+    static String exportedBackendName(final Map<String, String> environment) throws IOException {
+        final String configured = environment.getOrDefault(BACKEND_JAR_ENVIRONMENT, EXPORTED_BACKEND_NAME).trim();
+        if (configured.isEmpty()
+            || !configured.endsWith(".jar")
+            || !Path.of(configured).getFileName().toString().equals(configured)) {
+            throw new IOException(BACKEND_JAR_ENVIRONMENT + " must be a plain .jar filename");
+        }
+        return configured;
     }
 
     static ExtractionResult extract(final InputStream source, final Path target) throws IOException {

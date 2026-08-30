@@ -95,14 +95,21 @@ tasks.register("printPaperVersion") {
     }
 }
 
-val installShardingbaseManager by tasks.registering(Copy::class) {
+val installShardingbaseBackend by tasks.registering {
     group = "build"
-    description = "Install the self-extracting Shardingbase manager in the project root"
-    doNotTrackState("The project root contains Gradle's live lock files")
-    dependsOn(":shardingbase-node:jar")
-    from(layout.projectDirectory.file("shardingbase-node/build/libs/Shardingbase-Node.jar"))
-    into(layout.projectDirectory)
-    rename { "Shardingbase.jar" }
+    description = "Install the standalone Shardingbase backend in the project root"
+    dependsOn(":paper-server:createShardingbaseJar")
+    val source = layout.projectDirectory.file("paper-server/build/libs/Shardingbase.jar")
+    val target = layout.projectDirectory.file("Shardingbase.jar")
+    inputs.file(source)
+    outputs.file(target)
+    doLast {
+        java.nio.file.Files.copy(
+            source.asFile.toPath(),
+            target.asFile.toPath(),
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+        )
+    }
 }
 
 val assembleShardingbaseRelease by tasks.registering(Sync::class) {
@@ -112,12 +119,10 @@ val assembleShardingbaseRelease by tasks.registering(Sync::class) {
         ":paper-server:createShardingbaseJar",
         ":shardingbase-velocity:jar",
         ":shardingbase-node:jar",
-        installShardingbaseManager,
+        installShardingbaseBackend,
     )
     into(layout.buildDirectory.dir("release"))
-    from(layout.projectDirectory.file("paper-server/build/libs/Shardingbase.jar")) {
-        rename { "Shardingbase-server.jar" }
-    }
+    from(layout.projectDirectory.file("paper-server/build/libs/Shardingbase.jar"))
     from(layout.projectDirectory.file("shardingbase-velocity/build/libs/Shardingbase-Velocity.jar"))
     from(layout.projectDirectory.file("shardingbase-node/build/libs/Shardingbase-Node.jar"))
 }

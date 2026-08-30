@@ -1,0 +1,156 @@
+{
+    "_comment": "DO NOT EDIT: FILE GENERATED FOR IMPORT BY PTERODACTYL PANEL - PTERODACTYL.IO",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-08-30T00:00:00+00:00",
+    "name": "Shardingbase Node",
+    "author": "shardingbase@invalid.example",
+    "description": "Runs the self-extracting Shardingbase node and its supervised Paper-compatible backend. Allocate enough container memory for BACKEND_MEMORY plus NODE_MEMORY and native overhead.",
+    "features": [
+        "eula",
+        "java_version",
+        "pid_limit"
+    ],
+    "docker_images": {
+        "Java 25": "ghcr.io\/pterodactyl\/yolks:java_25"
+    },
+    "file_denylist": [],
+    "startup": "java -Xms32M -Xmx{{NODE_MEMORY}}M -Dterminal.jline=false -Dterminal.ansi=true -jar {{SERVER_JARFILE}} {{SERVER_ARGS}}",
+    "config": {
+        "files": "{\r\n    \"server.properties\": {\r\n        \"parser\": \"properties\",\r\n        \"find\": {\r\n            \"server-ip\": \"0.0.0.0\",\r\n            \"server-port\": \"{{server.build.default.port}}\",\r\n            \"query.port\": \"{{server.build.default.port}}\"\r\n        }\r\n    }\r\n}",
+        "startup": "{\r\n    \"done\": \")! For help, type \"\r\n}",
+        "logs": "{}",
+        "stop": "stop"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!\/bin\/ash\nset -eu\nmkdir -p \/mnt\/server\/backups\ncd \/mnt\/server\nif [ -n \"${SHARDINGBASE_DOWNLOAD_URL:-}\" ]; then\n    echo \"Downloading Shardingbase Node from the configured URL\"\n    curl --fail --location --output \"${SERVER_JARFILE}\" \"${SHARDINGBASE_DOWNLOAD_URL}\"\nelse\n    echo \"No download URL configured. Upload Shardingbase-Node.jar as ${SERVER_JARFILE} after installation.\"\nfi\n",
+            "container": "ghcr.io\/pterodactyl\/installers:alpine",
+            "entrypoint": "ash"
+        }
+    },
+    "variables": [
+        {
+            "name": "Node Jar File",
+            "description": "The uploaded self-extracting Shardingbase-Node jar.",
+            "env_variable": "SERVER_JARFILE",
+            "default_value": "Shardingbase-Node.jar",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|regex:/^([\\w\\d._-]+)(\\.jar)$/",
+            "field_type": "text"
+        },
+        {
+            "name": "Node Heap (MiB)",
+            "description": "Heap reserved for the lightweight parent process. 128 MiB is normally sufficient.",
+            "env_variable": "NODE_MEMORY",
+            "default_value": "128",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|min:64|max:512",
+            "field_type": "text"
+        },
+        {
+            "name": "Backend Heap (MiB)",
+            "description": "Maximum heap assigned to the Minecraft child JVM. Container memory must also cover the node and native overhead.",
+            "env_variable": "SHARDINGBASE_BACKEND_MEMORY_MB",
+            "default_value": "4096",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|min:512|max:131072",
+            "field_type": "text"
+        },
+        {
+            "name": "Extracted Backend Jar",
+            "description": "Plain filename used when the node exports its embedded backend beside itself.",
+            "env_variable": "SHARDINGBASE_BACKEND_JAR",
+            "default_value": "Shardingbase-backend.jar",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|regex:/^([\\w\\d._-]+)(\\.jar)$/",
+            "field_type": "text"
+        },
+        {
+            "name": "Minecraft Arguments",
+            "description": "Arguments forwarded unchanged to the backend server.",
+            "env_variable": "SERVER_ARGS",
+            "default_value": "nogui",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string|max:512",
+            "field_type": "text"
+        },
+        {
+            "name": "Controller URI",
+            "description": "Pinned TLS control listener on Velocity, for example tls://proxy.example.net:8443.",
+            "env_variable": "SHARDINGBASE_CONTROLLER_URI",
+            "default_value": "tls://127.0.0.1:8443",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:255",
+            "field_type": "text"
+        },
+        {
+            "name": "TLS Certificate SHA-256",
+            "description": "The 64-hex-character certificate fingerprint printed by the Velocity plugin.",
+            "env_variable": "SHARDINGBASE_CERTIFICATE_SHA256",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|regex:/^[A-Fa-f0-9]{64}$/",
+            "field_type": "text"
+        },
+        {
+            "name": "Node ID",
+            "description": "Must be node-a or node-b and match Velocity's node-credentials entry.",
+            "env_variable": "SHARDINGBASE_NODE_ID",
+            "default_value": "node-a",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|in:node-a,node-b",
+            "field_type": "text"
+        },
+        {
+            "name": "Node Credential",
+            "description": "Secret generated in the Velocity plugin configuration for this node.",
+            "env_variable": "SHARDINGBASE_NODE_CREDENTIAL",
+            "default_value": "",
+            "user_viewable": false,
+            "user_editable": false,
+            "rules": "nullable|string|max:255",
+            "field_type": "text"
+        },
+        {
+            "name": "Backup Root",
+            "description": "Directory reserved for mandatory transaction backups.",
+            "env_variable": "SHARDINGBASE_BACKUP_ROOT",
+            "default_value": "backups",
+            "user_viewable": true,
+            "user_editable": false,
+            "rules": "required|string|max:128",
+            "field_type": "text"
+        },
+        {
+            "name": "Backup Retention",
+            "description": "Number of completed transaction backups retained by node policy.",
+            "env_variable": "SHARDINGBASE_BACKUP_RETENTION",
+            "default_value": "3",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|min:1|max:30",
+            "field_type": "text"
+        },
+        {
+            "name": "Optional Node Download URL",
+            "description": "Optional direct URL used only during reinstall. Leave blank when uploading the jar manually.",
+            "env_variable": "SHARDINGBASE_DOWNLOAD_URL",
+            "default_value": "",
+            "user_viewable": false,
+            "user_editable": false,
+            "rules": "nullable|url|max:2048",
+            "field_type": "text"
+        }
+    ]
+}

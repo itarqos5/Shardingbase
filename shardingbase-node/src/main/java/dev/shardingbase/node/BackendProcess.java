@@ -13,7 +13,9 @@ import java.util.concurrent.TimeUnit;
  * Launches and supervises the extracted backend in its own JVM.
  */
 final class BackendProcess {
+    static final String BACKEND_MEMORY_ENVIRONMENT = "SHARDINGBASE_BACKEND_MEMORY_MB";
     private static final long SHUTDOWN_TIMEOUT_SECONDS = 60L;
+    private static final int MINIMUM_BACKEND_MEMORY_MIB = 512;
 
     private BackendProcess() {
     }
@@ -31,7 +33,7 @@ final class BackendProcess {
 
         final ProcessBuilder builder = new ProcessBuilder(command(
             javaExecutable(),
-            ManagementFactory.getRuntimeMXBean().getInputArguments(),
+            backendJvmArguments(ManagementFactory.getRuntimeMXBean().getInputArguments(), System.getenv()),
             normalizedBackend,
             serverArguments
         ))
@@ -53,6 +55,44 @@ final class BackendProcess {
                 // The JVM is already shutting down and the hook is responsible for the child.
             }
         }
+    }
+
+    static List<String> backendJvmArguments(
+        final List<String> inheritedArguments,
+        final Map<String, String> environment
+    ) throws IOException {
+        final String configuredMemory = environment.get(BACKEND_MEMORY_ENVIRONMENT);
+        if (configuredMemory == null || configuredMemory.isBlank()) {
+            return List.copyOf(inheritedArguments);
+        }
+
+        final int memoryMib;
+        try {
+            memoryMib = Integer.parseInt(configuredMemory.trim());
+        } catch (NumberFormatException exception) {
+            throw new IOException(BACKEND_MEMORY_ENVIRONMENT + " must be an integer number of MiB", exception);
+        }
+        if (memoryMib < MINIMUM_BACKEND_MEMORY_MIB) {
+            throw new IOException(BACKEND_MEMORY_ENVIRONMENT + " must be at least " + MINIMUM_BACKEND_MEMORY_MIB);
+        }
+
+        final List<String> childArguments = new ArrayList<>(inheritedArguments.size() + 2);
+        for (final String argument : inheritedArguments) {
+            if (!isHeapSizingArgument(argument)) {
+                childArguments.add(argument);
+            }
+        }
+        childArguments.add("-Xms128M");
+        childArguments.add("-Xmx" + memoryMib + "M");
+        return List.copyOf(childArguments);
+    }
+
+    private static boolean isHeapSizingArgument(final String argument) {
+        return argument.startsWith("-Xms")
+            || argument.startsWith("-Xmx")
+            || argument.startsWith("-XX:MaxRAMPercentage=")
+            || argument.startsWith("-XX:InitialRAMPercentage=")
+            || argument.startsWith("-XX:MinRAMPercentage=");
     }
 
     static List<String> command(
