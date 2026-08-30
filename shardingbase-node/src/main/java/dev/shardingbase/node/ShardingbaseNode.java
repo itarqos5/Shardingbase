@@ -3,11 +3,16 @@ package dev.shardingbase.node;
 import dev.shardingbase.protocol.ShardingbaseProtocol;
 import java.io.IOException;
 import java.net.URISyntaxException;
+import java.util.Arrays;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 
 /**
  * Entry point for the backend supervisor and transaction agent.
  */
 public final class ShardingbaseNode {
+    private static final Set<String> ONE_SHOT_ARGUMENTS = Set.of("--help", "-h", "-?", "--version");
+
     private ShardingbaseNode() {
     }
 
@@ -34,6 +39,11 @@ public final class ShardingbaseNode {
                 if (exitCode != 0) {
                     System.exit(exitCode);
                 }
+                if (!isOneShot(args)) {
+                    System.out.println("Shardingbase node remains online while the backend is stopped.");
+                    System.out.println("Stop or restart the node process through your process manager to continue.");
+                    new CountDownLatch(1).await();
+                }
             }
         } catch (InterruptedException _) {
             Thread.currentThread().interrupt();
@@ -44,5 +54,9 @@ public final class ShardingbaseNode {
             exception.printStackTrace(System.err);
             System.exit(1);
         }
+    }
+
+    static boolean isOneShot(final String[] arguments) {
+        return Arrays.stream(arguments).anyMatch(ONE_SHOT_ARGUMENTS::contains);
     }
 }

@@ -5,6 +5,8 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BackendProcessTest {
     @Test
@@ -30,5 +32,12 @@ class BackendProcessTest {
             "--port",
             "25566"
         ), command);
+    }
+
+    @Test
+    void identifiesOneShotServerArguments() {
+        assertTrue(ShardingbaseNode.isOneShot(new String[] {"--help"}));
+        assertTrue(ShardingbaseNode.isOneShot(new String[] {"--nogui", "--version"}));
+        assertFalse(ShardingbaseNode.isOneShot(new String[] {"--nogui", "--port", "25565"}));
     }
 }
