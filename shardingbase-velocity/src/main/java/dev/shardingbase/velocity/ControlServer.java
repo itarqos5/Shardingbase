@@ -60,6 +60,8 @@ final class ControlServer implements AutoCloseable {
     private final ThreadPoolExecutor clients;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Thread acceptThread;
+    private volatile BoundaryTransferHandler boundaryTransferHandler = request ->
+        new PlayerHandoffCodec.BoundaryResponse(request.playerId(), false, "player transfer service is starting");
 
     ControlServer(
         final ProxyServer proxy,
@@ -218,6 +220,11 @@ final class ControlServer implements AutoCloseable {
                 frame,
                 MessageType.PLAYER_SNAPSHOT_FETCH_RESPONSE,
                 this.fetchPlayerSnapshot(source.nodeId(), frame)
+            ));
+            case PLAYER_BOUNDARY_REQUEST -> source.send(response(
+                frame,
+                MessageType.PLAYER_BOUNDARY_RESPONSE,
+                this.requestBoundaryTransfer(source.nodeId(), frame)
             ));
             case PLAYER_SETTINGS_GET -> source.send(response(
                 frame,
@@ -390,6 +397,20 @@ final class ControlServer implements AutoCloseable {
         return session != null && !session.closed();
     }
 
+    void boundaryTransferHandler(final BoundaryTransferHandler handler) {
+        this.boundaryTransferHandler = java.util.Objects.requireNonNull(handler, "handler");
+    }
+
+    private byte[] requestBoundaryTransfer(final String nodeId, final ProtocolFrame frame) throws IOException {
+        final PlayerHandoffCodec.BoundaryRequest request = PlayerHandoffCodec.decodeBoundaryRequest(frame.payload());
+        if (!this.registry.nodeIdForTarget(request.sourceBackendId()).filter(nodeId::equals).isPresent()) {
+            return PlayerHandoffCodec.encodeBoundaryResponse(new PlayerHandoffCodec.BoundaryResponse(
+                request.playerId(), false, "boundary source is not owned by this node"
+            ));
+        }
+        return PlayerHandoffCodec.encodeBoundaryResponse(this.boundaryTransferHandler.begin(request));
+    }
+
     private void completeTransaction(final String nodeId, final ProtocolFrame frame) throws IOException {
         final PendingTransaction pending = this.pendingTransactions.remove(frame.correlationId());
         if (pending == null) {
@@ -557,6 +578,11 @@ final class ControlServer implements AutoCloseable {
         public byte[] manifestDigest() {
             return this.manifestDigest.clone();
         }
+    }
+
+    @FunctionalInterface
+    interface BoundaryTransferHandler {
+        PlayerHandoffCodec.BoundaryResponse begin(PlayerHandoffCodec.BoundaryRequest request) throws IOException;
     }
 
     private static final class ClientSession {

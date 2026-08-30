@@ -53,6 +53,10 @@ public final class PlayerHandoffCodec {
                 categoryBits |= 1L << category.ordinal();
             }
             output.writeLong(categoryBits);
+            output.writeBoolean(capture.destination() != null);
+            if (capture.destination() != null) {
+                writeDestination(output, capture.destination());
+            }
         }
         return bytes.toByteArray();
     }
@@ -63,10 +67,16 @@ public final class PlayerHandoffCodec {
             final String target = readString(input);
             final long revision = input.readLong();
             final EnumSet<PlayerDataCategory> categories = decodeCategories(input.readLong());
+            final TransferDestination destination;
+            if (input.available() == 0) {
+                destination = null;
+            } else {
+                destination = input.readBoolean() ? readDestination(input) : null;
+            }
             if (revision < 1 || input.available() != 0) {
                 throw new ProtocolException("Invalid player capture request");
             }
-            return new Capture(playerId, target, revision, categories);
+            return new Capture(playerId, target, revision, categories, destination);
         }
     }
 
@@ -324,13 +334,28 @@ public final class PlayerHandoffCodec {
         }
     }
 
-    public record Capture(UUID playerId, String targetBackendId, long revision, Set<PlayerDataCategory> categories) {
+    public record Capture(
+        UUID playerId,
+        String targetBackendId,
+        long revision,
+        Set<PlayerDataCategory> categories,
+        TransferDestination destination
+    ) {
         public Capture {
             if (playerId == null || targetBackendId == null || targetBackendId.isBlank()
                 || revision < 1 || categories == null || categories.isEmpty()) {
                 throw new IllegalArgumentException("Player capture fields are required");
             }
             categories = Set.copyOf(categories);
+        }
+
+        public Capture(
+            final UUID playerId,
+            final String targetBackendId,
+            final long revision,
+            final Set<PlayerDataCategory> categories
+        ) {
+            this(playerId, targetBackendId, revision, categories, null);
         }
     }
 

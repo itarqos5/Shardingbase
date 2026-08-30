@@ -105,6 +105,28 @@ class PersistentControlServerTest {
             assertEquals(MessageType.PLAYER_SNAPSHOT_CAPTURE, pushed.messageType());
             assertEquals(3, PlayerHandoffCodec.decodeCapture(pushed.payload()).revision());
 
+            final PlayerHandoffCodec.TransferDestination destination =
+                new PlayerHandoffCodec.TransferDestination(
+                    "minecraft:overworld", UUID.randomUUID(), 8.5, 72.0, -3.25, 45.0F, 2.0F
+                );
+            server.boundaryTransferHandler(request -> {
+                assertEquals("backend-id-a", request.sourceBackendId());
+                assertEquals(destination, request.destination());
+                return new PlayerHandoffCodec.BoundaryResponse(request.playerId(), true, "capture requested");
+            });
+            final UUID boundaryId = UUID.randomUUID();
+            FrameCodec.write(socket.getOutputStream(), frame(
+                MessageType.PLAYER_BOUNDARY_REQUEST,
+                boundaryId,
+                PlayerHandoffCodec.encodeBoundaryRequest(new PlayerHandoffCodec.BoundaryRequest(
+                    pushedPlayerId, "backend-id-a", "backend-id-b", destination
+                ))
+            ));
+            final ProtocolFrame boundaryFrame = FrameCodec.read(socket.getInputStream());
+            assertEquals(MessageType.PLAYER_BOUNDARY_RESPONSE, boundaryFrame.messageType());
+            assertEquals(boundaryId, boundaryFrame.correlationId());
+            assertTrue(PlayerHandoffCodec.decodeBoundaryResponse(boundaryFrame.payload()).accepted());
+
             final UUID settingsId = UUID.randomUUID();
             final var selectedCategories = EnumSet.of(PlayerDataCategory.INVENTORY, PlayerDataCategory.HEALTH);
             FrameCodec.write(socket.getOutputStream(), frame(

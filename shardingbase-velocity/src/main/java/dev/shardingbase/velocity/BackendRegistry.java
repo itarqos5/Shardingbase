@@ -148,6 +148,23 @@ final class BackendRegistry {
         }
     }
 
+    synchronized Optional<BackendTarget> backendForId(final String serverId) throws IOException {
+        try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement(
+            "SELECT server_id, server_name, node_id FROM backends WHERE server_id = ? LIMIT 1"
+        )) {
+            statement.setString(1, serverId);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? Optional.of(new BackendTarget(
+                    result.getString("server_id"),
+                    result.getString("server_name"),
+                    result.getString("node_id")
+                )) : Optional.empty();
+            }
+        } catch (final SQLException exception) {
+            throw new IOException("SQLite backend ID lookup failed", exception);
+        }
+    }
+
     synchronized Optional<BackendTarget> peerForName(final String serverName) throws IOException {
         try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement(
             "SELECT server_id, server_name, node_id FROM backends WHERE server_name <> ? ORDER BY server_id LIMIT 1"

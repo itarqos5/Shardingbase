@@ -23,16 +23,21 @@ class PlayerHandoffCodecTest {
         assertEquals(playerId, prepare.playerId());
         assertTrue(prepare.categories().contains(PlayerDataCategory.EXPERIENCE));
 
+        final PlayerHandoffCodec.TransferDestination destination = new PlayerHandoffCodec.TransferDestination(
+            "minecraft:overworld", UUID.randomUUID(), 32.5, 70.0, -16.25, 90.0F, -12.0F
+        );
         final PlayerHandoffCodec.Capture capture = PlayerHandoffCodec.decodeCapture(
             PlayerHandoffCodec.encodeCapture(new PlayerHandoffCodec.Capture(
                 playerId,
                 "backend-b",
                 41,
-                EnumSet.of(PlayerDataCategory.INVENTORY, PlayerDataCategory.EXPERIENCE)
+                EnumSet.of(PlayerDataCategory.INVENTORY, PlayerDataCategory.EXPERIENCE),
+                destination
             ))
         );
         assertEquals(41, capture.revision());
         assertTrue(capture.categories().contains(PlayerDataCategory.INVENTORY));
+        assertEquals(destination, capture.destination());
 
         final PlayerHandoffCodec.Acknowledgement acknowledgement = PlayerHandoffCodec.decodeAcknowledgement(
             PlayerHandoffCodec.encodeAcknowledgement(new PlayerHandoffCodec.Acknowledgement(
@@ -42,9 +47,6 @@ class PlayerHandoffCodecTest {
         assertEquals(42, acknowledgement.revision());
         assertTrue(acknowledgement.accepted());
 
-        final PlayerHandoffCodec.TransferDestination destination = new PlayerHandoffCodec.TransferDestination(
-            "minecraft:overworld", UUID.randomUUID(), 32.5, 70.0, -16.25, 90.0F, -12.0F
-        );
         final PlayerHandoffCodec.Stage stage = PlayerHandoffCodec.decodeStage(PlayerHandoffCodec.encodeStage(
             new PlayerHandoffCodec.Stage("backend-b", new PlayerSnapshot(
                 playerId,

@@ -4,6 +4,7 @@ import com.velocitypowered.api.event.EventTask;
 import com.velocitypowered.api.event.player.KickedFromServerEvent;
 import com.velocitypowered.api.event.player.ServerPreConnectEvent;
 import com.velocitypowered.api.proxy.Player;
+import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import dev.shardingbase.protocol.PlayerDataCategory;
 import dev.shardingbase.protocol.PlayerHandoffCodec;
@@ -20,6 +21,7 @@ final class PlayerTransferCoordinator {
     private static final Duration STAGE_TIMEOUT = Duration.ofSeconds(10);
 
     private final BackendRegistry registry;
+    private final ProxyServer proxy;
     private final PlayerStateStore playerStateStore;
     private final ControlServer controlServer;
     private final Logger logger;
@@ -27,15 +29,67 @@ final class PlayerTransferCoordinator {
     private final ConcurrentHashMap<UUID, String> bypass = new ConcurrentHashMap<>();
 
     PlayerTransferCoordinator(
+        final ProxyServer proxy,
         final BackendRegistry registry,
         final PlayerStateStore playerStateStore,
         final ControlServer controlServer,
         final Logger logger
     ) {
+        this.proxy = proxy;
         this.registry = registry;
         this.playerStateStore = playerStateStore;
         this.controlServer = controlServer;
         this.logger = logger;
+    }
+
+    PlayerHandoffCodec.BoundaryResponse beginBoundary(final PlayerHandoffCodec.BoundaryRequest request)
+        throws IOException {
+        final Player player = this.proxy.getPlayer(request.playerId())
+            .orElseThrow(() -> new IOException("player is no longer connected to Velocity"));
+        final BackendRegistry.BackendTarget source = this.registry.backendForId(request.sourceBackendId())
+            .orElseThrow(() -> new IOException("source backend is not registered"));
+        final BackendRegistry.BackendTarget target = this.registry.backendForId(request.targetBackendId())
+            .orElseThrow(() -> new IOException("target backend is not registered"));
+        final var currentConnection = player.getCurrentServer()
+            .orElseThrow(() -> new IOException("player is not connected to a source backend"));
+        if (!source.serverName().equals(currentConnection.getServerInfo().getName())) {
+            throw new IOException("player is not connected to the claimed source backend");
+        }
+        final BackendRegistry.BackendTarget expectedPeer = this.registry.peerForName(source.serverName())
+            .orElseThrow(() -> new IOException("source peer is not registered"));
+        if (!expectedPeer.serverId().equals(target.serverId())) {
+            throw new IOException("boundary target is not the registered peer");
+        }
+        if (!this.controlServer.nodeConnected(target.nodeId())) {
+            throw new IOException("target node is unavailable");
+        }
+        final BackendRegistry.BackendStatus status = this.registry.statusForName(target.serverName())
+            .orElseThrow(() -> new IOException("target backend status is unavailable"));
+        if (status.maintenance()) {
+            throw new IOException("target backend is in maintenance: " + status.detail());
+        }
+        final RegisteredServer targetServer = this.proxy.getServer(target.serverName())
+            .orElseThrow(() -> new IOException("target is missing from Velocity servers"));
+        final long revision = this.playerStateStore.reserveRevision(player.getUniqueId());
+        final PendingTransfer transfer = new PendingTransfer(
+            currentConnection.getServer(), targetServer, target.serverId(), revision, request.destination()
+        );
+        if (this.pending.putIfAbsent(player.getUniqueId(), transfer) != null) {
+            throw new IOException("a player handoff is already active");
+        }
+        try {
+            this.controlServer.sendPlayerCapture(source, new PlayerHandoffCodec.Capture(
+                player.getUniqueId(),
+                target.serverId(),
+                revision,
+                this.playerStateStore.categories(),
+                request.destination()
+            ));
+            return new PlayerHandoffCodec.BoundaryResponse(player.getUniqueId(), true, "capture requested");
+        } catch (final IOException exception) {
+            this.pending.remove(player.getUniqueId(), transfer);
+            throw exception;
+        }
     }
 
     EventTask beforeConnect(final ServerPreConnectEvent event) {
@@ -96,7 +150,9 @@ final class PlayerTransferCoordinator {
                 .orElseThrow(() -> new IOException("target backend is not registered"));
             final long revision = this.playerStateStore.reserveRevision(player.getUniqueId());
             final var categories = this.playerStateStore.categories();
-            final PendingTransfer transfer = new PendingTransfer(sourceServer, targetServer, target.serverId(), revision);
+            final PendingTransfer transfer = new PendingTransfer(
+                sourceServer, targetServer, target.serverId(), revision, null
+            );
             if (this.pending.putIfAbsent(player.getUniqueId(), transfer) != null) {
                 throw new IOException("a player handoff is already active");
             }
@@ -143,7 +199,8 @@ final class PlayerTransferCoordinator {
         RegisteredServer source,
         RegisteredServer target,
         String targetBackendId,
-        long revision
+        long revision,
+        PlayerHandoffCodec.TransferDestination destination
     ) {
     }
 }

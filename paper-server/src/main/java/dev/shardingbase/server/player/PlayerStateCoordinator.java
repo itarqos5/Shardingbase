@@ -185,7 +185,7 @@ public final class PlayerStateCoordinator implements AutoCloseable {
                         revision,
                         this.backendId,
                         captured.categories()
-                    ));
+                    ), managed == null ? null : managed.destination());
                 } catch (final IOException exception) {
                     this.logger.log(
                         Level.WARNING,

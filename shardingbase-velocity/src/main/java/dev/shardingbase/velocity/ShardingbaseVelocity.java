@@ -190,11 +190,13 @@ public final class ShardingbaseVelocity {
             this.backendRegistry = registry;
             this.remoteCommandAllowlist = configuration.remoteCommandAllowlist();
             this.playerTransfers = new PlayerTransferCoordinator(
+                this.proxy,
                 registry,
                 playerStateStore,
                 this.controlServer,
                 this.logger
             );
+            this.controlServer.boundaryTransferHandler(this.playerTransfers::beginBoundary);
             this.logger.info(
                 "Shardingbase controller listening on {}:{} for {} registered Velocity backend(s); protocol {}; TLS SHA-256 {}",
                 configuration.bindAddress(),

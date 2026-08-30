@@ -59,12 +59,21 @@ public final class PlayerHandoffClient {
 
     /** Persists a captured revision at Velocity for one target backend. */
     public void stage(final String targetBackendId, final PlayerSnapshot snapshot) throws IOException {
+        this.stage(targetBackendId, snapshot, null);
+    }
+
+    /** Persists a captured revision and its optional exact transfer destination. */
+    public void stage(
+        final String targetBackendId,
+        final PlayerSnapshot snapshot,
+        final PlayerHandoffCodec.TransferDestination destination
+    ) throws IOException {
         final ProtocolFrame response = this.node.request(
             this.backendId,
             ProtocolChannel.PLAYER_SYNC,
             MessageType.PLAYER_SNAPSHOT_STAGE,
             "velocity",
-            PlayerHandoffCodec.encodeStage(new PlayerHandoffCodec.Stage(targetBackendId, snapshot))
+            PlayerHandoffCodec.encodeStage(new PlayerHandoffCodec.Stage(targetBackendId, snapshot, destination))
         );
         requireType(response, MessageType.PLAYER_SNAPSHOT_ACK);
         final PlayerHandoffCodec.Acknowledgement acknowledgement = PlayerHandoffCodec.decodeAcknowledgement(
