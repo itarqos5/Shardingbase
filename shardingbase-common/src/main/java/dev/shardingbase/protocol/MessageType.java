@@ -19,6 +19,7 @@ public enum MessageType {
     PLAYER_SETTINGS_RESPONSE,
     BACKEND_POLL,
     BACKEND_POLL_EMPTY,
+    BACKEND_SEND_ACK,
     ERROR,
     FILE_BEGIN,
     FILE_CHUNK,

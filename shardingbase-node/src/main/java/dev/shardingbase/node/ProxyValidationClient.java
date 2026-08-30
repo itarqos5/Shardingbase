@@ -157,6 +157,29 @@ final class ProxyValidationClient implements AutoCloseable {
         }
     }
 
+    void send(
+        final ProtocolChannel channel,
+        final MessageType messageType,
+        final String targetId,
+        final byte[] payload
+    ) throws IOException {
+        if (this.closed.get() || this.connection.get() == null) {
+            throw new IOException("Shardingbase proxy session is not connected");
+        }
+        final ProtocolFrame frame = new ProtocolFrame(
+            ShardingbaseProtocol.VERSION,
+            channel,
+            messageType,
+            UUID.randomUUID(),
+            this.nodeId(),
+            targetId,
+            payload
+        );
+        if (!this.outbound.offer(frame)) {
+            throw new IOException("Shardingbase proxy outbound queue is full");
+        }
+    }
+
     void pushHandler(final ProtocolChannel channel, final Consumer<ProtocolFrame> pushHandler) {
         this.pushHandlers.put(
             Objects.requireNonNull(channel, "channel"),

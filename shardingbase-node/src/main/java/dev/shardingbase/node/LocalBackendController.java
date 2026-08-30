@@ -24,6 +24,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
+import dev.shardingbase.protocol.ProtocolChannel;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Authenticated loopback service exposed only to the backend child. */
@@ -35,7 +37,8 @@ final class LocalBackendController implements AutoCloseable {
     private final ProxyValidationClient proxyClient;
     private final ExecutorService clients;
     private final AtomicBoolean closed = new AtomicBoolean();
-    private final ArrayBlockingQueue<ProtocolFrame> backendPushes = new ArrayBlockingQueue<>(64);
+    private final ConcurrentHashMap<ProtocolChannel, ArrayBlockingQueue<ProtocolFrame>> backendPushes =
+        new ConcurrentHashMap<>();
     private final Thread acceptThread;
 
     LocalBackendController(final ProxyValidationClient proxyClient) throws IOException {
@@ -52,7 +55,16 @@ final class LocalBackendController implements AutoCloseable {
             .daemon(true)
             .name("Shardingbase Local Control")
             .start(this::acceptLoop);
-        this.proxyClient.pushHandler(dev.shardingbase.protocol.ProtocolChannel.PLAYER_SYNC, this::enqueueBackendPush);
+        for (final ProtocolChannel channel : new ProtocolChannel[] {
+            ProtocolChannel.PLAYER_SYNC,
+            ProtocolChannel.COMMAND,
+            ProtocolChannel.REMOTE_OPERATION,
+            ProtocolChannel.MAP,
+            ProtocolChannel.WORLD_TRANSACTION
+        }) {
+            this.backendPushes.put(channel, new ArrayBlockingQueue<>(64));
+            this.proxyClient.pushHandler(channel, this::enqueueBackendPush);
+        }
     }
 
     static LocalBackendController start(final ProxyValidationClient proxyClient) throws IOException {
@@ -122,9 +134,13 @@ final class LocalBackendController implements AutoCloseable {
 
     private ProtocolFrame forward(final ProtocolFrame request) throws IOException {
         if ("node-local".equals(request.targetId()) && request.messageType() == MessageType.BACKEND_POLL) {
+            final ArrayBlockingQueue<ProtocolFrame> queue = this.backendPushes.get(request.channel());
+            if (queue == null) {
+                throw new IOException("Unsupported backend polling channel " + request.channel());
+            }
             final ProtocolFrame pushed;
             try {
-                pushed = this.backendPushes.poll(5, TimeUnit.SECONDS);
+                pushed = queue.poll(5, TimeUnit.SECONDS);
             } catch (final InterruptedException exception) {
                 Thread.currentThread().interrupt();
                 throw new IOException("Interrupted while polling backend control messages", exception);
@@ -136,6 +152,23 @@ final class LocalBackendController implements AutoCloseable {
                 ShardingbaseProtocol.VERSION,
                 request.channel(),
                 MessageType.BACKEND_POLL_EMPTY,
+                request.correlationId(),
+                "node",
+                request.sourceId(),
+                new byte[0]
+            );
+        }
+        if (!"velocity".equals(request.targetId())) {
+            this.proxyClient.send(
+                request.channel(),
+                request.messageType(),
+                request.targetId(),
+                request.payload()
+            );
+            return new ProtocolFrame(
+                ShardingbaseProtocol.VERSION,
+                request.channel(),
+                MessageType.BACKEND_SEND_ACK,
                 request.correlationId(),
                 "node",
                 request.sourceId(),
@@ -169,7 +202,8 @@ final class LocalBackendController implements AutoCloseable {
     }
 
     private void enqueueBackendPush(final ProtocolFrame frame) {
-        if (this.backendPushes.offer(frame)) {
+        final ArrayBlockingQueue<ProtocolFrame> queue = this.backendPushes.get(frame.channel());
+        if (queue != null && queue.offer(frame)) {
             return;
         }
         try {
