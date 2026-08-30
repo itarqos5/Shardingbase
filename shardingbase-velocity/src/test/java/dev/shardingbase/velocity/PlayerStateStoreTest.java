@@ -39,4 +39,15 @@ class PlayerStateStoreTest {
             store.acceptRevision(playerId, 4, "backend-a", new byte[] {4}));
         assertEquals(5, store.load(playerId).orElseThrow().revision());
     }
+
+    @Test
+    void reservesRevisionsAcrossRetriesAndStoredSnapshots(@TempDir final Path directory) throws Exception {
+        final PlayerStateStore store = new PlayerStateStore(directory.resolve("shardingbase.db"));
+        final UUID playerId = UUID.randomUUID();
+        assertEquals(1, store.reserveRevision(playerId));
+        assertEquals(2, store.reserveRevision(playerId));
+        assertEquals(PlayerStateStore.StageResult.STORED,
+            store.acceptRevision(playerId, 2, "backend-a", new byte[] {2}));
+        assertEquals(3, new PlayerStateStore(directory.resolve("shardingbase.db")).reserveRevision(playerId));
+    }
 }

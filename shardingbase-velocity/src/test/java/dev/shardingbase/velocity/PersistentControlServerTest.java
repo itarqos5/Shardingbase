@@ -5,6 +5,9 @@ import com.velocitypowered.api.proxy.server.RegisteredServer;
 import dev.shardingbase.protocol.FrameCodec;
 import dev.shardingbase.protocol.MessageType;
 import dev.shardingbase.protocol.NodeAuthenticationCodec;
+import dev.shardingbase.protocol.PlayerDataCategory;
+import dev.shardingbase.protocol.PlayerHandoffCodec;
+import dev.shardingbase.protocol.PlayerSnapshot;
 import dev.shardingbase.protocol.ProtocolChannel;
 import dev.shardingbase.protocol.ProtocolFrame;
 import dev.shardingbase.protocol.ShardingbaseProtocol;
@@ -15,6 +18,7 @@ import java.net.ServerSocket;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
+import java.util.EnumSet;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -43,12 +47,17 @@ class PersistentControlServerTest {
             Map.of("node-a", "credential-a", "node-b", "credential-b")
         );
         final TlsMaterial tls = TlsMaterial.loadOrCreate(configuration);
+        final BackendRegistry registry = new BackendRegistry(configuration.databasePath());
+        registry.register("node-a", validationRequest("credential-a", "backend-id-a", "backend-a"));
+        registry.register("node-b", validationRequest("credential-b", "backend-id-b", "backend-b"));
+        final PlayerStateStore playerStateStore = new PlayerStateStore(configuration.databasePath());
         try (ControlServer server = new ControlServer(
             proxyWithBackend(),
             NOPLogger.NOP_LOGGER,
             configuration,
             tls,
-            new BackendRegistry(configuration.databasePath())
+            registry,
+            playerStateStore
         ); SSLSocket socket = connect(port)) {
             final UUID authenticationId = UUID.randomUUID();
             FrameCodec.write(socket.getOutputStream(), frame(
@@ -72,18 +81,56 @@ class PersistentControlServerTest {
             FrameCodec.write(socket.getOutputStream(), frame(
                 MessageType.VALIDATE_BACKEND_REQUEST,
                 validationId,
-                ValidationPayloadCodec.encodeRequest(new ValidationPayloadCodec.ValidationRequest(
-                    "credential-a",
-                    "backend-id-a",
-                    "backend-a",
-                    "26.2",
-                    "test-build"
-                ))
+                ValidationPayloadCodec.encodeRequest(validationRequest("credential-a", "backend-id-a", "backend-a"))
             ));
             final ProtocolFrame validation = FrameCodec.read(socket.getInputStream());
             assertEquals(MessageType.VALIDATE_BACKEND_RESPONSE, validation.messageType());
             assertEquals(validationId, validation.correlationId());
+
+            final UUID playerId = UUID.randomUUID();
+            final UUID prepareId = UUID.randomUUID();
+            FrameCodec.write(socket.getOutputStream(), frame(
+                MessageType.PLAYER_SNAPSHOT_PREPARE,
+                prepareId,
+                PlayerHandoffCodec.encodePrepare(new PlayerHandoffCodec.Prepare(
+                    playerId,
+                    "backend-id-b",
+                    EnumSet.of(PlayerDataCategory.INVENTORY)
+                ))
+            ));
+            final PlayerHandoffCodec.Acknowledgement prepared = PlayerHandoffCodec.decodeAcknowledgement(
+                FrameCodec.read(socket.getInputStream()).payload()
+            );
+            assertTrue(prepared.accepted());
+
+            final UUID stageId = UUID.randomUUID();
+            FrameCodec.write(socket.getOutputStream(), frame(
+                MessageType.PLAYER_SNAPSHOT_STAGE,
+                stageId,
+                PlayerHandoffCodec.encodeStage(new PlayerHandoffCodec.Stage(
+                    "backend-id-b",
+                    new PlayerSnapshot(
+                        playerId,
+                        prepared.revision(),
+                        "backend-id-a",
+                        Map.of(PlayerDataCategory.INVENTORY, new byte[] {1, 2})
+                    )
+                ))
+            ));
+            final PlayerHandoffCodec.Acknowledgement staged = PlayerHandoffCodec.decodeAcknowledgement(
+                FrameCodec.read(socket.getInputStream()).payload()
+            );
+            assertTrue(staged.accepted());
+            assertEquals(prepared.revision(), playerStateStore.load(playerId).orElseThrow().revision());
         }
+    }
+
+    private static ValidationPayloadCodec.ValidationRequest validationRequest(
+        final String credential,
+        final String serverId,
+        final String serverName
+    ) {
+        return new ValidationPayloadCodec.ValidationRequest(credential, serverId, serverName, "26.2", "test-build");
     }
 
     private static ProtocolFrame frame(final MessageType type, final UUID correlationId, final byte[] payload) {

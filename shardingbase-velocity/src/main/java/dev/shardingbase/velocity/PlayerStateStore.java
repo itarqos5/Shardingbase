@@ -20,18 +20,68 @@ final class PlayerStateStore {
     PlayerStateStore(final Path databasePath) throws IOException {
         Files.createDirectories(databasePath.toAbsolutePath().normalize().getParent());
         this.jdbcUrl = "jdbc:sqlite:" + databasePath.toAbsolutePath().normalize();
-        try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement("""
-            CREATE TABLE IF NOT EXISTS player_snapshots (
-                player_uuid TEXT PRIMARY KEY NOT NULL,
-                revision INTEGER NOT NULL CHECK (revision > 0),
-                source_backend_id TEXT NOT NULL,
-                snapshot BLOB NOT NULL,
-                updated_epoch_ms INTEGER NOT NULL
-            )
-            """)) {
-            statement.executeUpdate();
+        try (Connection connection = this.connection()) {
+            try (PreparedStatement statement = connection.prepareStatement("""
+                CREATE TABLE IF NOT EXISTS player_snapshots (
+                    player_uuid TEXT PRIMARY KEY NOT NULL,
+                    revision INTEGER NOT NULL CHECK (revision > 0),
+                    source_backend_id TEXT NOT NULL,
+                    snapshot BLOB NOT NULL,
+                    updated_epoch_ms INTEGER NOT NULL
+                )
+                """)) {
+                statement.executeUpdate();
+            }
+            try (PreparedStatement statement = connection.prepareStatement("""
+                CREATE TABLE IF NOT EXISTS player_revisions (
+                    player_uuid TEXT PRIMARY KEY NOT NULL,
+                    reserved_revision INTEGER NOT NULL CHECK (reserved_revision > 0)
+                )
+                """)) {
+                statement.executeUpdate();
+            }
         } catch (final SQLException exception) {
             throw failure("Unable to initialize player snapshot storage", exception);
+        }
+    }
+
+    synchronized long reserveRevision(final UUID playerId) throws IOException {
+        try (Connection connection = this.connection()) {
+            connection.setAutoCommit(false);
+            try {
+                long current = 0;
+                try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT MAX(revision) AS current_revision FROM (
+                        SELECT revision FROM player_snapshots WHERE player_uuid = ?
+                        UNION ALL
+                        SELECT reserved_revision AS revision FROM player_revisions WHERE player_uuid = ?
+                    )
+                    """)) {
+                    statement.setString(1, playerId.toString());
+                    statement.setString(2, playerId.toString());
+                    try (ResultSet result = statement.executeQuery()) {
+                        if (result.next()) {
+                            current = result.getLong("current_revision");
+                        }
+                    }
+                }
+                final long next = Math.addExact(current, 1);
+                try (PreparedStatement statement = connection.prepareStatement("""
+                    INSERT INTO player_revisions (player_uuid, reserved_revision) VALUES (?, ?)
+                    ON CONFLICT(player_uuid) DO UPDATE SET reserved_revision = excluded.reserved_revision
+                    """)) {
+                    statement.setString(1, playerId.toString());
+                    statement.setLong(2, next);
+                    statement.executeUpdate();
+                }
+                connection.commit();
+                return next;
+            } catch (final SQLException | ArithmeticException exception) {
+                connection.rollback();
+                throw exception;
+            }
+        } catch (final SQLException | ArithmeticException exception) {
+            throw failure("Unable to reserve a player snapshot revision", exception);
         }
     }
 

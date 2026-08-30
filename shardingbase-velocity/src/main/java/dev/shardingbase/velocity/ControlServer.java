@@ -4,6 +4,8 @@ import com.velocitypowered.api.proxy.ProxyServer;
 import dev.shardingbase.protocol.FrameCodec;
 import dev.shardingbase.protocol.MessageType;
 import dev.shardingbase.protocol.NodeAuthenticationCodec;
+import dev.shardingbase.protocol.PlayerHandoffCodec;
+import dev.shardingbase.protocol.PlayerSnapshot;
 import dev.shardingbase.protocol.ProtocolChannel;
 import dev.shardingbase.protocol.ProtocolFrame;
 import dev.shardingbase.protocol.ReplayWindow;
@@ -36,6 +38,7 @@ final class ControlServer implements AutoCloseable {
     private final Logger logger;
     private final Map<String, String> credentials;
     private final BackendRegistry registry;
+    private final PlayerStateStore playerStateStore;
     private final ConcurrentHashMap<String, ClientSession> sessions = new ConcurrentHashMap<>();
     private final SSLServerSocket serverSocket;
     private final ThreadPoolExecutor clients;
@@ -47,12 +50,14 @@ final class ControlServer implements AutoCloseable {
         final Logger logger,
         final VelocityConfiguration configuration,
         final TlsMaterial tlsMaterial,
-        final BackendRegistry registry
+        final BackendRegistry registry,
+        final PlayerStateStore playerStateStore
     ) throws IOException {
         this.proxy = proxy;
         this.logger = logger;
         this.credentials = configuration.nodeCredentials();
         this.registry = registry;
+        this.playerStateStore = playerStateStore;
         this.serverSocket = (SSLServerSocket) tlsMaterial.context().getServerSocketFactory().createServerSocket();
         this.serverSocket.setEnabledProtocols(new String[] {"TLSv1.3"});
         this.serverSocket.bind(new InetSocketAddress(
@@ -180,8 +185,57 @@ final class ControlServer implements AutoCloseable {
                 MessageType.VALIDATE_BACKEND_RESPONSE,
                 ValidationPayloadCodec.encodeResponse(this.validate(source.nodeId(), frame))
             ));
+            case PLAYER_SNAPSHOT_PREPARE -> source.send(response(
+                frame,
+                MessageType.PLAYER_SNAPSHOT_ACK,
+                this.preparePlayerHandoff(frame)
+            ));
+            case PLAYER_SNAPSHOT_STAGE -> source.send(response(
+                frame,
+                MessageType.PLAYER_SNAPSHOT_ACK,
+                this.stagePlayerSnapshot(source.nodeId(), frame)
+            ));
             default -> source.send(error(frame, "unexpected message for Velocity authority"));
         }
+    }
+
+    private byte[] preparePlayerHandoff(final ProtocolFrame frame) throws IOException {
+        final PlayerHandoffCodec.Prepare prepare = PlayerHandoffCodec.decodePrepare(frame.payload());
+        if (this.registry.nodeIdForTarget(prepare.targetBackendId()).isEmpty()) {
+            return PlayerHandoffCodec.encodeAcknowledgement(new PlayerHandoffCodec.Acknowledgement(
+                prepare.playerId(), 1, false, "target backend is not registered"
+            ));
+        }
+        final long revision = this.playerStateStore.reserveRevision(prepare.playerId());
+        return PlayerHandoffCodec.encodeAcknowledgement(new PlayerHandoffCodec.Acknowledgement(
+            prepare.playerId(), revision, true, "revision reserved"
+        ));
+    }
+
+    private byte[] stagePlayerSnapshot(final String nodeId, final ProtocolFrame frame) throws IOException {
+        final PlayerHandoffCodec.Stage stage = PlayerHandoffCodec.decodeStage(frame.payload());
+        final PlayerSnapshot snapshot = stage.snapshot();
+        if (!this.registry.nodeIdForTarget(snapshot.sourceBackendId()).filter(nodeId::equals).isPresent()) {
+            return PlayerHandoffCodec.encodeAcknowledgement(new PlayerHandoffCodec.Acknowledgement(
+                snapshot.playerId(), snapshot.revision(), false, "snapshot source is not owned by this node"
+            ));
+        }
+        if (this.registry.nodeIdForTarget(stage.targetBackendId()).isEmpty()) {
+            return PlayerHandoffCodec.encodeAcknowledgement(new PlayerHandoffCodec.Acknowledgement(
+                snapshot.playerId(), snapshot.revision(), false, "target backend is not registered"
+            ));
+        }
+        final PlayerStateStore.StageResult result = this.playerStateStore.acceptRevision(
+            snapshot.playerId(),
+            snapshot.revision(),
+            snapshot.sourceBackendId(),
+            PlayerHandoffCodec.encodeStage(stage)
+        );
+        final boolean accepted = result == PlayerStateStore.StageResult.STORED
+            || result == PlayerStateStore.StageResult.DUPLICATE;
+        return PlayerHandoffCodec.encodeAcknowledgement(new PlayerHandoffCodec.Acknowledgement(
+            snapshot.playerId(), snapshot.revision(), accepted, result.name().toLowerCase(java.util.Locale.ROOT)
+        ));
     }
 
     private ValidationResponse validate(final String nodeId, final ProtocolFrame frame) throws IOException {

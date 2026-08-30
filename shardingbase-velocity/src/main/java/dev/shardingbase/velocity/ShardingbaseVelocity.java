@@ -58,8 +58,10 @@ public final class ShardingbaseVelocity {
             final VelocityConfiguration configuration = VelocityConfiguration.load(this.dataDirectory);
             final TlsMaterial tlsMaterial = TlsMaterial.loadOrCreate(configuration);
             final BackendRegistry registry = new BackendRegistry(configuration.databasePath());
-            new PlayerStateStore(configuration.databasePath());
-            this.controlServer = new ControlServer(this.proxy, this.logger, configuration, tlsMaterial, registry);
+            final PlayerStateStore playerStateStore = new PlayerStateStore(configuration.databasePath());
+            this.controlServer = new ControlServer(
+                this.proxy, this.logger, configuration, tlsMaterial, registry, playerStateStore
+            );
             this.logger.info(
                 "Shardingbase controller listening on {}:{} for {} registered Velocity backend(s); protocol {}; TLS SHA-256 {}",
                 configuration.bindAddress(),
