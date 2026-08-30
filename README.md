@@ -114,6 +114,13 @@ Feature states are:
 - `DISABLED` when validation fails or times out; retries use capped backoff.
 - `MAINTENANCE` for a registered shard that cannot safely accept players.
 
+A committed world contains `shardingbase-shard.properties` with the transaction
+ID, world key, X/Z axis, chunk cut, owned half, peer ID, and format version. The
+backend validates these strict manifests before plugin loading. The public
+ownership API then returns `LOCAL` or `REMOTE` by block position, including
+negative coordinates. If controller validation is unavailable while any manifest
+exists, the backend enters `MAINTENANCE` instead of silently disabling ownership.
+
 Operator commands and permissions (all operator-only by default):
 
 - `/shardingbase` — identity, version, feature state, proxy, peer, and help.
@@ -195,6 +202,8 @@ Implemented and tested in this branch:
   POI data, including negative region coordinates;
 - dual transaction authorization, atomic phase journals, mandatory complete
   backups with hash manifests, and non-destructive split preparation;
+- atomic shard manifests, real local/remote ownership lookup, and maintenance
+  locking when a sharded backend loses its controller;
 - monotonic SQLite player revisions plus bounded portable snapshot codecs for
   every configurable data category;
 - asynchronous public API result types and peer/identity reporting;
