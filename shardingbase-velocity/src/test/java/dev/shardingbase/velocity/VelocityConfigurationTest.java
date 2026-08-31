@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -19,9 +20,24 @@ class VelocityConfigurationTest {
         assertEquals(8443, configuration.controlPort());
         assertTrue(configuration.remoteCommandAllowlist().isEmpty());
         assertEquals(8080, configuration.webPort());
+        assertTrue(configuration.webTlsEnabled());
         assertTrue(Files.isRegularFile(directory.resolve("config.yml")));
         assertTrue(configuration.keyStorePath().startsWith(directory));
         assertTrue(configuration.databasePath().startsWith(directory));
+    }
+
+    @Test
+    void separatesPublicHttpsFromReverseProxyTransport(@TempDir final Path directory) throws Exception {
+        final VelocityConfiguration generated = VelocityConfiguration.load(directory);
+        final String configured = Files.readString(directory.resolve("config.yml"))
+            .replace("tls-enabled: true", "tls-enabled: false")
+            .replace(generated.webPublicUrl(), "https://proxy.example.net/planner");
+        Files.writeString(directory.resolve("config.yml"), configured);
+
+        final VelocityConfiguration configuration = VelocityConfiguration.load(directory);
+
+        assertEquals("https://proxy.example.net/planner", configuration.webPublicUrl());
+        assertFalse(configuration.webTlsEnabled());
     }
 
     @Test

@@ -2,6 +2,7 @@ package dev.shardingbase.velocity;
 
 import dev.shardingbase.protocol.ValidationPayloadCodec.ValidationRequest;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -28,7 +29,7 @@ class BackendRegistryTest {
         assertEquals("node-a", registry.nodeIdForTarget("backend-a").orElseThrow());
         assertEquals("node-b", registry.nodeIdForTarget("node-b").orElseThrow());
         assertEquals("id-b", registry.peerForName("backend-a").orElseThrow().serverId());
-        registry.setPairStatus(java.util.List.of("id-a", "id-b"), "MAINTENANCE", "world cut");
+        registry.setPairStatus(List.of("id-a", "id-b"), "MAINTENANCE", "world cut");
         assertTrue(registry.statusForName("backend-a").orElseThrow().maintenance());
         assertEquals("world cut", registry.statusForName("backend-b").orElseThrow().detail());
         assertTrue(registry.register("node-a", request("id-a", "backend-a", "26.2", "build-a")).accepted());
@@ -40,7 +41,7 @@ class BackendRegistryTest {
         assertTrue(registry.lastSeen("id-b") > 0L);
         assertTrue(registry.register("node-a", request("id-a", "backend-a", "26.2", "build-a")).accepted());
         assertTrue(registry.lastSeen("id-a") > 0L);
-        registry.setPairStatus(java.util.List.of("id-a", "id-b"), "ONLINE", "transaction complete");
+        registry.setPairStatus(List.of("id-a", "id-b"), "ONLINE", "transaction complete");
         assertFalse(registry.statusForName("backend-a").orElseThrow().maintenance());
         assertTrue(registry.nodeIdForTarget("missing").isEmpty());
     }

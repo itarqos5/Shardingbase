@@ -1,27 +1,28 @@
 package dev.shardingbase.velocity;
 
 import dev.shardingbase.protocol.FrameCodec;
+import dev.shardingbase.protocol.PlayerDataCategory;
+import dev.shardingbase.protocol.PlayerHandoffCodec;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Arrays;
-import java.util.Optional;
-import java.util.UUID;
-import dev.shardingbase.protocol.PlayerHandoffCodec;
-import dev.shardingbase.protocol.PlayerDataCategory;
 import java.util.EnumSet;
+import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /** SQLite authority for monotonic, idempotent portable player snapshots. */
 final class PlayerStateStore {
     private final String jdbcUrl;
 
     PlayerStateStore(final Path databasePath) throws IOException {
+        SqliteSupport.ensureDriverLoaded();
         Files.createDirectories(databasePath.toAbsolutePath().normalize().getParent());
         this.jdbcUrl = "jdbc:sqlite:" + databasePath.toAbsolutePath().normalize();
         try (Connection connection = this.connection()) {
@@ -217,7 +218,7 @@ final class PlayerStateStore {
         final String targetBackendId,
         final long timeoutMillis
     ) throws IOException {
-        final long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
         while (System.nanoTime() < deadline) {
             final Optional<StoredSnapshot> stored = this.load(playerId);
             if (stored.isPresent() && stored.orElseThrow().revision() == revision) {
@@ -227,7 +228,7 @@ final class PlayerStateStore {
                 }
             }
             try {
-                java.util.concurrent.TimeUnit.MILLISECONDS.sleep(25);
+                TimeUnit.MILLISECONDS.sleep(25);
             } catch (final InterruptedException exception) {
                 Thread.currentThread().interrupt();
                 throw new IOException("Interrupted while awaiting staged player state", exception);
@@ -237,11 +238,7 @@ final class PlayerStateStore {
     }
 
     private Connection connection() throws SQLException {
-        final Connection connection = DriverManager.getConnection(this.jdbcUrl);
-        try (PreparedStatement statement = connection.prepareStatement("PRAGMA busy_timeout = 5000")) {
-            statement.execute();
-        }
-        return connection;
+        return SqliteSupport.open(this.jdbcUrl);
     }
 
     private static StoredSnapshot find(final Connection connection, final UUID playerId) throws SQLException {

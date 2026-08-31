@@ -1,14 +1,15 @@
 package dev.shardingbase.velocity;
 
 import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.SecureRandom;
-import java.net.URI;
-import java.net.URISyntaxException;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -16,7 +17,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.time.Instant;
 import org.yaml.snakeyaml.DumperOptions;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
@@ -26,12 +26,18 @@ import org.yaml.snakeyaml.representer.Representer;
 /**
  * Validated Velocity controller configuration.
  *
- * @param bindAddress      control listener bind address
- * @param controlPort      control listener port
- * @param keyStorePath     PKCS12 key store path
- * @param keyStorePassword key store password
- * @param databasePath     SQLite database path
- * @param nodeCredentials  exactly two node IDs and credentials
+ * @param bindAddress            control listener bind address
+ * @param controlPort            control listener port
+ * @param keyStorePath           PKCS12 key store path
+ * @param keyStorePassword       key store password
+ * @param databasePath           SQLite database path
+ * @param nodeCredentials        exactly two node IDs and credentials
+ * @param transactionSigningKey  shared transaction authorization key
+ * @param remoteCommandAllowlist command roots eligible for remote routing
+ * @param webBindAddress         planner listener bind address
+ * @param webPort                planner listener port
+ * @param webPublicUrl           externally reachable planner base URL
+ * @param webTlsEnabled          whether the planner listener itself terminates TLS
  */
 record VelocityConfiguration(
     String bindAddress,
@@ -44,7 +50,8 @@ record VelocityConfiguration(
     Set<String> remoteCommandAllowlist,
     String webBindAddress,
     int webPort,
-    String webPublicUrl
+    String webPublicUrl,
+    boolean webTlsEnabled
 ) {
     VelocityConfiguration {
         nodeCredentials = Map.copyOf(nodeCredentials);
@@ -94,10 +101,15 @@ record VelocityConfiguration(
         final String webPublicUrl = web.isEmpty()
             ? "http://127.0.0.1:" + webPort
             : publicUrl(web.get("public-url"));
+        final boolean webTlsEnabled = web.isEmpty()
+            ? false
+            : web.containsKey("tls-enabled")
+                ? bool(web.get("tls-enabled"), "web.tls-enabled")
+                : webPublicUrl.startsWith("https://");
         final VelocityConfiguration configuration = new VelocityConfiguration(
             bind, port, keyStore, password, database, credentials, transactionSigningKey,
             stringSet(root.get("remote-command-allowlist"), "remote-command-allowlist"),
-            webBind, webPort, webPublicUrl
+            webBind, webPort, webPublicUrl, webTlsEnabled
         );
         if (missingTransactionKey) {
             final Path backup = path.resolveSibling(path.getFileName() + ".bak." + Instant.now().toEpochMilli());
@@ -119,7 +131,8 @@ record VelocityConfiguration(
             Set.of(),
             "0.0.0.0",
             8080,
-            "http://127.0.0.1:8080"
+            "https://127.0.0.1:8080",
+            true
         );
     }
 
@@ -149,7 +162,8 @@ record VelocityConfiguration(
         root.put("web", Map.of(
             "bind", configuration.webBindAddress(),
             "port", configuration.webPort(),
-            "public-url", configuration.webPublicUrl()
+            "public-url", configuration.webPublicUrl(),
+            "tls-enabled", configuration.webTlsEnabled()
         ));
         final DumperOptions options = new DumperOptions();
         options.setDefaultFlowStyle(DumperOptions.FlowStyle.BLOCK);
@@ -222,6 +236,13 @@ record VelocityConfiguration(
             return number.intValue();
         }
         throw new IOException(field + " must be an integer");
+    }
+
+    private static boolean bool(final Object value, final String field) throws IOException {
+        if (value instanceof final Boolean bool) {
+            return bool;
+        }
+        throw new IOException(field + " must be true or false");
     }
 
     private static Set<String> stringSet(final Object value, final String field) throws IOException {

@@ -7,8 +7,8 @@ import dev.shardingbase.protocol.MessageType;
 import dev.shardingbase.protocol.NodeAuthenticationCodec;
 import dev.shardingbase.protocol.PlayerDataCategory;
 import dev.shardingbase.protocol.PlayerHandoffCodec;
-import dev.shardingbase.protocol.PlayerSnapshot;
 import dev.shardingbase.protocol.PlayerSettingsCodec;
+import dev.shardingbase.protocol.PlayerSnapshot;
 import dev.shardingbase.protocol.ProtocolChannel;
 import dev.shardingbase.protocol.ProtocolFrame;
 import dev.shardingbase.protocol.RemoteCommandCodec;
@@ -19,10 +19,12 @@ import java.lang.reflect.Proxy;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
+import java.time.Duration;
+import java.util.Base64;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -36,8 +38,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.helpers.NOPLogger;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PersistentControlServerTest {
@@ -52,11 +54,12 @@ class PersistentControlServerTest {
             "test-password",
             directory.resolve("shardingbase.db"),
             Map.of("node-a", "credential-a", "node-b", "credential-b"),
-            java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[32]),
+            Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[32]),
             Set.of("home"),
             "127.0.0.1",
             8080,
-            "http://127.0.0.1:8080"
+            "http://127.0.0.1:8080",
+            false
         );
         final TlsMaterial tls = TlsMaterial.loadOrCreate(configuration);
         final BackendRegistry registry = new BackendRegistry(configuration.databasePath());
@@ -156,7 +159,7 @@ class PersistentControlServerTest {
             final ProtocolFrame commandPush = FrameCodec.read(socket.getInputStream());
             final RemoteCommandCodec.Request commandRequest = RemoteCommandCodec.decodeRequest(commandPush.payload());
             final RemoteCommandCodec.Response commandResponse = new RemoteCommandCodec.Response(
-                commandRequest.requestId(), RemoteCommandCodec.Outcome.SUCCESS, "executed", java.util.List.of("Done")
+                commandRequest.requestId(), RemoteCommandCodec.Outcome.SUCCESS, "executed", List.of("Done")
             );
             FrameCodec.write(socket.getOutputStream(), frame(
                 ProtocolChannel.COMMAND,
@@ -185,7 +188,7 @@ class PersistentControlServerTest {
                 1_024L
             );
             final byte[] transactionKey =
-                java.util.Base64.getUrlDecoder().decode(configuration.transactionSigningKey());
+                Base64.getUrlDecoder().decode(configuration.transactionSigningKey());
             final WorldTransactionCodec.Request transactionRequest = new WorldTransactionCodec.Request(
                 WorldTransactionCodec.Operation.STATUS,
                 WorldTransactionCodec.sign(transactionManifest, transactionKey)

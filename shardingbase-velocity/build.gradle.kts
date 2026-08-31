@@ -23,7 +23,7 @@ tasks.test {
 
 tasks.jar {
     dependsOn(project(":shardingbase-common").tasks.jar)
-    archiveFileName = "Shardingbase-Velocity.jar"
+    archiveFileName = "shardingbase-velocity.jar"
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     from({
         configurations.runtimeClasspath.get().map { dependency ->

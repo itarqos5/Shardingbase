@@ -2,11 +2,12 @@ package dev.shardingbase.velocity;
 
 import com.google.inject.Inject;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.tree.RootCommandNode;
 import com.velocitypowered.api.event.EventTask;
 import com.velocitypowered.api.event.Subscribe;
-import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.command.CommandExecuteEvent;
 import com.velocitypowered.api.event.command.PlayerAvailableCommandsEvent;
+import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.player.KickedFromServerEvent;
 import com.velocitypowered.api.event.player.ServerPreConnectEvent;
 import com.velocitypowered.api.event.player.TabCompleteEvent;
@@ -14,6 +15,7 @@ import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
 import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
+import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import dev.shardingbase.protocol.RemoteCommandCodec;
 import dev.shardingbase.protocol.ShardingbaseProtocol;
@@ -100,7 +102,7 @@ public final class ShardingbaseVelocity {
 
     @Subscribe
     public EventTask onCommandExecute(final CommandExecuteEvent event) {
-        if (!(event.getCommandSource() instanceof final com.velocitypowered.api.proxy.Player player)) {
+        if (!(event.getCommandSource() instanceof final Player player)) {
             return null;
         }
         final Optional<BackendRegistry.BackendTarget> route = this.remoteRoute(player, event.getCommand());
@@ -172,31 +174,37 @@ public final class ShardingbaseVelocity {
     }
 
     private void initialize() {
+        ControlServer newControl = null;
+        VelocityWorldTransactionCoordinator newTransactions = null;
+        PlannerWebServer newPlanner = null;
         try {
             final VelocityConfiguration configuration = VelocityConfiguration.load(this.dataDirectory);
             final TlsMaterial tlsMaterial = TlsMaterial.loadOrCreate(configuration);
             final BackendRegistry registry = new BackendRegistry(configuration.databasePath());
             final PlayerStateStore playerStateStore = new PlayerStateStore(configuration.databasePath());
             final WorldPlannerStore worldPlannerStore = new WorldPlannerStore(configuration.databasePath());
-            this.controlServer = new ControlServer(
+            newControl = new ControlServer(
                 this.proxy, this.logger, configuration, tlsMaterial, registry, playerStateStore, worldPlannerStore
             );
-            this.worldTransactions = new VelocityWorldTransactionCoordinator(
-                this.proxy, configuration, worldPlannerStore, registry, this.controlServer, this.logger
+            newTransactions = new VelocityWorldTransactionCoordinator(
+                this.proxy, configuration, worldPlannerStore, registry, newControl, this.logger
             );
-            this.plannerWebServer = new PlannerWebServer(
-                configuration, worldPlannerStore, registry, this.worldTransactions::submit, this.logger
+            newPlanner = new PlannerWebServer(
+                configuration, tlsMaterial, worldPlannerStore, registry, newTransactions::submit, this.logger
             );
+            this.controlServer = newControl;
+            this.worldTransactions = newTransactions;
+            this.plannerWebServer = newPlanner;
             this.backendRegistry = registry;
             this.remoteCommandAllowlist = configuration.remoteCommandAllowlist();
             this.playerTransfers = new PlayerTransferCoordinator(
                 this.proxy,
                 registry,
                 playerStateStore,
-                this.controlServer,
+                newControl,
                 this.logger
             );
-            this.controlServer.boundaryTransferHandler(this.playerTransfers::beginBoundary);
+            newControl.boundaryTransferHandler(this.playerTransfers::beginBoundary);
             this.logger.info(
                 "Shardingbase controller listening on {}:{} for {} registered Velocity backend(s); protocol {}; TLS SHA-256 {}",
                 configuration.bindAddress(),
@@ -206,12 +214,25 @@ public final class ShardingbaseVelocity {
                 tlsMaterial.fingerprint()
             );
         } catch (final Exception exception) {
+            if (newPlanner != null) {
+                newPlanner.close();
+            }
+            if (newTransactions != null) {
+                newTransactions.close();
+            }
+            if (newControl != null) {
+                try {
+                    newControl.close();
+                } catch (final IOException closeFailure) {
+                    exception.addSuppressed(closeFailure);
+                }
+            }
             this.logger.error("Shardingbase controller failed to initialize; distributed features are unavailable", exception);
         }
     }
 
     private Optional<BackendRegistry.BackendTarget> remoteRoute(
-        final com.velocitypowered.api.proxy.Player player,
+        final Player player,
         final String commandLine
     ) {
         final ControlServer control = this.controlServer;
@@ -238,7 +259,7 @@ public final class ShardingbaseVelocity {
         }
     }
 
-    private static Optional<String> currentServerName(final com.velocitypowered.api.proxy.Player player) {
+    private static Optional<String> currentServerName(final Player player) {
         return player.getCurrentServer().map(connection -> connection.getServerInfo().getName());
     }
 
@@ -254,7 +275,7 @@ public final class ShardingbaseVelocity {
 
     @SuppressWarnings({"rawtypes", "unchecked"})
     private static void addRemoteCommand(final PlayerAvailableCommandsEvent event, final String label) {
-        final com.mojang.brigadier.tree.RootCommandNode root = event.getRootNode();
+        final RootCommandNode root = event.getRootNode();
         root.addChild(LiteralArgumentBuilder.literal(label).build());
     }
 }

@@ -1,5 +1,6 @@
 package dev.shardingbase.velocity;
 
+import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import dev.shardingbase.protocol.WorldTransactionCodec;
 import dev.shardingbase.protocol.WorldTransactionCodec.Manifest;
@@ -8,6 +9,7 @@ import dev.shardingbase.protocol.WorldTransactionCodec.Outcome;
 import dev.shardingbase.protocol.WorldTransactionCodec.Request;
 import dev.shardingbase.protocol.WorldTransactionCodec.Response;
 import java.io.IOException;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
@@ -165,15 +167,19 @@ final class VelocityWorldTransactionCoordinator implements AutoCloseable {
         final PlanContext context
     ) throws IOException {
         final String reason = "world transaction " + plan.transactionId() + " is preparing an offline shard cut";
+        this.store.transition(plan.transactionId(), "PREFLIGHT_READY", "MAINTENANCE", reason);
+        this.enforceMaintenance(context, reason);
+    }
+
+    private void enforceMaintenance(final PlanContext context, final String reason) throws IOException {
         this.registry.setPairStatus(context.backendIds(), "MAINTENANCE", reason);
-        for (final com.velocitypowered.api.proxy.Player player : this.proxy.getAllPlayers()) {
+        for (final Player player : this.proxy.getAllPlayers()) {
             final String current = player.getCurrentServer()
                 .map(connection -> connection.getServerInfo().getName()).orElse("");
             if (current.equals(context.source().serverName()) || current.equals(context.target().serverName())) {
                 player.disconnect(Component.text("Shardingbase maintenance: " + reason));
             }
         }
-        this.store.transition(plan.transactionId(), "PREFLIGHT_READY", "MAINTENANCE", reason);
     }
 
     private void authorize(
@@ -181,9 +187,13 @@ final class VelocityWorldTransactionCoordinator implements AutoCloseable {
         final PlanContext context,
         final WorldTransactionCodec.SignedManifest signed
     ) throws IOException {
+        this.enforceMaintenance(
+            context,
+            "world transaction " + plan.transactionId() + " is preparing an offline shard cut"
+        );
         requireConnected(context);
         final Request request = new Request(Operation.AUTHORIZE_AND_SAVE, signed);
-        final ResponsePair responses = requestBoth(context, request, LONG_NODE_TIMEOUT);
+        final ResponsePair responses = this.requestBoth(context, request, LONG_NODE_TIMEOUT);
         requireOutcome(responses.source(), Outcome.READY, context.manifest(), "source save authorization");
         requireOutcome(responses.target(), Outcome.READY, context.manifest(), "target save authorization");
         this.store.transition(
@@ -197,7 +207,7 @@ final class VelocityWorldTransactionCoordinator implements AutoCloseable {
         final PlanContext context,
         final WorldTransactionCodec.SignedManifest signed
     ) throws IOException {
-        final ResponsePair responses = requestBoth(
+        final ResponsePair responses = this.requestBoth(
             context, new Request(Operation.STOP_BACKEND, signed), Duration.ofSeconds(75)
         );
         requireOutcome(responses.source(), Outcome.SUCCESS, context.manifest(), "source stop");
@@ -283,7 +293,7 @@ final class VelocityWorldTransactionCoordinator implements AutoCloseable {
         final PlanContext context,
         final WorldTransactionCodec.SignedManifest signed
     ) throws IOException {
-        awaitHealth(context.target(), context.manifest(), signed);
+        this.awaitHealth(context.target(), context.manifest(), signed);
         this.store.transition(
             plan.transactionId(), "STARTING_TARGET", "TARGET_HEALTHY",
             "target backend restarted and revalidated"
@@ -307,7 +317,7 @@ final class VelocityWorldTransactionCoordinator implements AutoCloseable {
         final PlanContext context,
         final WorldTransactionCodec.SignedManifest signed
     ) throws IOException {
-        awaitHealth(context.source(), context.manifest(), signed);
+        this.awaitHealth(context.source(), context.manifest(), signed);
         this.store.transition(
             plan.transactionId(), "STARTING_SOURCE", "BOTH_HEALTHY",
             "both sharded backends restarted and revalidated"
@@ -326,7 +336,7 @@ final class VelocityWorldTransactionCoordinator implements AutoCloseable {
         final PlanContext context,
         final WorldTransactionCodec.SignedManifest signed
     ) throws IOException {
-        final ResponsePair responses = requestBoth(
+        final ResponsePair responses = this.requestBoth(
             context, new Request(Operation.COMPLETE, signed), SHORT_NODE_TIMEOUT
         );
         requireOutcome(responses.source(), Outcome.SUCCESS, context.manifest(), "source completion");
@@ -384,7 +394,7 @@ final class VelocityWorldTransactionCoordinator implements AutoCloseable {
             if ("FINALIZING".equals(plan.state())) {
                 try {
                     TimeUnit.SECONDS.sleep(1);
-                } catch (final InterruptedException exception) {
+                } catch (InterruptedException _) {
                     Thread.currentThread().interrupt();
                     return;
                 }
@@ -405,12 +415,12 @@ final class VelocityWorldTransactionCoordinator implements AutoCloseable {
                 final PlanContext context = this.context(plan);
                 final WorldTransactionCodec.SignedManifest signed =
                     WorldTransactionCodec.sign(context.manifest(), this.signingKey);
-                final ResponsePair responses = requestBoth(
+                final ResponsePair responses = this.requestBoth(
                     context, new Request(Operation.ROLLBACK, signed), SHORT_NODE_TIMEOUT
                 );
                 requireOutcome(responses.source(), Outcome.SUCCESS, context.manifest(), "source authorization abort");
                 requireOutcome(responses.target(), Outcome.SUCCESS, context.manifest(), "target authorization abort");
-                final ResponsePair completions = requestBoth(
+                final ResponsePair completions = this.requestBoth(
                     context, new Request(Operation.COMPLETE, signed), SHORT_NODE_TIMEOUT
                 );
                 requireOutcome(completions.source(), Outcome.SUCCESS, context.manifest(), "source abort completion");
@@ -435,7 +445,7 @@ final class VelocityWorldTransactionCoordinator implements AutoCloseable {
         final WorldTransactionCodec.SignedManifest signed
     ) throws IOException {
         final Request rollback = new Request(Operation.ROLLBACK, signed);
-        final ResponsePair responses = requestBoth(context, rollback, LONG_NODE_TIMEOUT);
+        final ResponsePair responses = this.requestBoth(context, rollback, LONG_NODE_TIMEOUT);
         requireOutcome(responses.source(), Outcome.SUCCESS, context.manifest(), "source rollback");
         requireOutcome(responses.target(), Outcome.SUCCESS, context.manifest(), "target rollback");
         this.restartAfterRollback(
@@ -444,9 +454,9 @@ final class VelocityWorldTransactionCoordinator implements AutoCloseable {
         this.restartAfterRollback(
             context.target(), responses.target().backendRunning(), context.manifest(), signed
         );
-        awaitHealth(context.source(), context.manifest(), signed);
-        awaitHealth(context.target(), context.manifest(), signed);
-        final ResponsePair completions = requestBoth(
+        this.awaitHealth(context.source(), context.manifest(), signed);
+        this.awaitHealth(context.target(), context.manifest(), signed);
+        final ResponsePair completions = this.requestBoth(
             context, new Request(Operation.COMPLETE, signed), SHORT_NODE_TIMEOUT
         );
         requireOutcome(completions.source(), Outcome.SUCCESS, context.manifest(), "source rollback completion");
@@ -561,7 +571,7 @@ final class VelocityWorldTransactionCoordinator implements AutoCloseable {
         if (response.outcome() != required) {
             throw new IOException(phase + " failed: " + response.detail());
         }
-        if (!java.security.MessageDigest.isEqual(
+        if (!MessageDigest.isEqual(
             response.manifestDigest(),
             WorldTransactionCodec.digest(manifest)
         )) {

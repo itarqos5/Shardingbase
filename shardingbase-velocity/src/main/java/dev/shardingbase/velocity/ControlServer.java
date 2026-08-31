@@ -1,17 +1,19 @@
 package dev.shardingbase.velocity;
 
 import com.velocitypowered.api.proxy.ProxyServer;
+import dev.shardingbase.protocol.FileTransferCodec;
 import dev.shardingbase.protocol.FrameCodec;
-import dev.shardingbase.protocol.MessageType;
 import dev.shardingbase.protocol.MapPlannerCodec;
+import dev.shardingbase.protocol.MessageType;
 import dev.shardingbase.protocol.NodeAuthenticationCodec;
 import dev.shardingbase.protocol.PlayerHandoffCodec;
-import dev.shardingbase.protocol.PlayerSnapshot;
 import dev.shardingbase.protocol.PlayerSettingsCodec;
+import dev.shardingbase.protocol.PlayerSnapshot;
 import dev.shardingbase.protocol.ProtocolChannel;
 import dev.shardingbase.protocol.ProtocolFrame;
-import dev.shardingbase.protocol.ReplayWindow;
 import dev.shardingbase.protocol.RemoteCommandCodec;
+import dev.shardingbase.protocol.RemoteOperationCodec;
+import dev.shardingbase.protocol.ReplayWindow;
 import dev.shardingbase.protocol.ShardingbaseProtocol;
 import dev.shardingbase.protocol.ValidationPayloadCodec;
 import dev.shardingbase.protocol.ValidationPayloadCodec.ValidationRequest;
@@ -24,16 +26,17 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.Arrays;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.net.ssl.SSLServerSocket;
 import org.slf4j.Logger;
@@ -43,6 +46,8 @@ final class ControlServer implements AutoCloseable {
     private static final int CLIENT_TIMEOUT_MILLIS = 15_000;
     private static final int SESSION_QUEUE_CAPACITY = 256;
     private static final Duration COMMAND_TIMEOUT = Duration.ofSeconds(3);
+    private static final Duration RELAY_TIMEOUT = Duration.ofMinutes(5);
+    private static final Duration FILE_FRAME_TIMEOUT = Duration.ofSeconds(30);
 
     private final ProxyServer proxy;
     private final Logger logger;
@@ -56,6 +61,9 @@ final class ControlServer implements AutoCloseable {
     private final ConcurrentHashMap<UUID, CompletableFuture<RemoteCommandCodec.Response>> pendingCommands =
         new ConcurrentHashMap<>();
     private final ConcurrentHashMap<UUID, PendingTransaction> pendingTransactions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, RemoteRelay> remoteRelays = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, FileRelay> fileRelays = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, PendingFileFrame> pendingFileFrames = new ConcurrentHashMap<>();
     private final SSLServerSocket serverSocket;
     private final ThreadPoolExecutor clients;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -156,6 +164,7 @@ final class ControlServer implements AutoCloseable {
         } finally {
             if (session != null) {
                 this.sessions.remove(session.nodeId(), session);
+                this.removeRelaysForNode(session.nodeId());
                 session.close();
             } else {
                 try {
@@ -181,6 +190,7 @@ final class ControlServer implements AutoCloseable {
     }
 
     private void dispatch(final ClientSession source, final ProtocolFrame frame) throws IOException {
+        this.removeExpiredRelays();
         if (frame.version() != ShardingbaseProtocol.VERSION || !source.nodeId().equals(frame.sourceId())) {
             source.send(error(frame, "session identity or protocol version mismatch"));
             return;
@@ -190,12 +200,10 @@ final class ControlServer implements AutoCloseable {
             return;
         }
         if (!"velocity".equals(frame.targetId())) {
-            final String targetNodeId = this.registry.nodeIdForTarget(frame.targetId()).orElse(frame.targetId());
-            final ClientSession target = this.sessions.get(targetNodeId);
-            if (target == null) {
-                source.send(error(frame, "target node is unavailable"));
-            } else {
-                target.send(frame);
+            try {
+                this.relayNodeFrame(source, frame);
+            } catch (final IOException exception) {
+                source.send(error(frame, exception.getMessage() == null ? "node relay rejected" : exception.getMessage()));
             }
             return;
         }
@@ -287,6 +295,231 @@ final class ControlServer implements AutoCloseable {
             }
             case WORLD_TRANSACTION_RESPONSE -> this.completeTransaction(source.nodeId(), frame);
             default -> source.send(error(frame, "unexpected message for Velocity authority"));
+        }
+    }
+
+    private void relayNodeFrame(final ClientSession source, final ProtocolFrame frame) throws IOException {
+        switch (frame.channel()) {
+            case REMOTE_OPERATION -> this.relayRemoteOperation(source, frame);
+            case FILE_TRANSFER -> this.relayFileTransfer(source, frame);
+            default -> source.send(error(frame, "node-to-node relay is not allowed for this channel"));
+        }
+    }
+
+    private void relayRemoteOperation(final ClientSession source, final ProtocolFrame frame) throws IOException {
+        final String targetNodeId = this.registry.nodeIdForTarget(frame.targetId()).orElse("");
+        final ClientSession target = this.sessions.get(targetNodeId);
+        if (target == null || target.closed()) {
+            source.send(error(frame, "target node is unavailable"));
+            return;
+        }
+        if (frame.messageType() == MessageType.REMOTE_OPERATION_REQUEST) {
+            final var request = RemoteOperationCodec.decodeRequest(frame.payload());
+            final String originNode = this.registry.nodeIdForTarget(request.originBackendId()).orElse("");
+            if (!source.nodeId().equals(originNode) || targetNodeId.isBlank()
+                || source.nodeId().equals(targetNodeId)) {
+                source.send(error(frame, "remote operation backend ownership is invalid"));
+                return;
+            }
+            final RemoteRelay relay = new RemoteRelay(
+                source.nodeId(), targetNodeId, deadline(RELAY_TIMEOUT)
+            );
+            if (this.remoteRelays.putIfAbsent(request.operationId(), relay) != null) {
+                source.send(error(frame, "remote operation ID is already active"));
+                return;
+            }
+            this.expireRemoteRelay(request.operationId(), relay);
+            try {
+                target.send(frame);
+            } catch (final IOException exception) {
+                this.remoteRelays.remove(request.operationId(), relay);
+                throw exception;
+            }
+        } else if (frame.messageType() == MessageType.REMOTE_OPERATION_RESPONSE) {
+            final var response = RemoteOperationCodec.decodeResponse(frame.payload());
+            final RemoteRelay relay = this.remoteRelays.get(response.operationId());
+            if (relay == null || !source.nodeId().equals(relay.targetNodeId())
+                || !targetNodeId.equals(relay.sourceNodeId())) {
+                source.send(error(frame, "remote operation response has no authorized request"));
+                return;
+            }
+            if (!this.remoteRelays.remove(response.operationId(), relay)) {
+                source.send(error(frame, "remote operation request is no longer active"));
+                return;
+            }
+            target.send(frame);
+        } else {
+            source.send(error(frame, "unexpected remote operation relay message"));
+            return;
+        }
+        source.send(response(frame, MessageType.BACKEND_SEND_ACK, new byte[0]));
+    }
+
+    private void relayFileTransfer(final ClientSession source, final ProtocolFrame frame) throws IOException {
+        final String targetNodeId = this.registry.nodeIdForTarget(frame.targetId()).orElse("");
+        final ClientSession target = this.sessions.get(targetNodeId);
+        if (target == null || target.closed()) {
+            source.send(error(frame, "file transfer target is unavailable"));
+            return;
+        }
+        if (frame.messageType() == MessageType.FILE_ACK || frame.messageType() == MessageType.ERROR) {
+            final PendingFileFrame pending = this.pendingFileFrames.get(frame.correlationId());
+            if (pending == null || !source.nodeId().equals(pending.targetNodeId())
+                || !targetNodeId.equals(pending.sourceNodeId())) {
+                source.send(error(frame, "file response has no authorized request"));
+                return;
+            }
+            if (!this.pendingFileFrames.remove(frame.correlationId(), pending)) {
+                source.send(error(frame, "file response request is no longer active"));
+                return;
+            }
+            try {
+                target.send(frame);
+            } catch (final IOException exception) {
+                this.fileRelays.remove(pending.transferId());
+                throw exception;
+            }
+            if (pending.terminal()) {
+                this.fileRelays.remove(pending.transferId());
+            }
+            return;
+        }
+
+        final FileFrame fileFrame = this.authorizeFileFrame(source.nodeId(), targetNodeId, frame);
+        final PendingFileFrame pending = new PendingFileFrame(
+            source.nodeId(), targetNodeId, fileFrame.transferId(), fileFrame.terminal(),
+            deadline(FILE_FRAME_TIMEOUT)
+        );
+        if (this.pendingFileFrames.putIfAbsent(frame.correlationId(), pending) != null) {
+            if (frame.messageType() == MessageType.FILE_BEGIN) {
+                this.fileRelays.remove(fileFrame.transferId());
+            }
+            throw new IOException("file frame correlation ID is already active");
+        }
+        this.expirePendingFileFrame(frame.correlationId(), pending);
+        try {
+            target.send(frame);
+        } catch (final IOException exception) {
+            this.pendingFileFrames.remove(frame.correlationId(), pending);
+            this.fileRelays.remove(fileFrame.transferId());
+            throw exception;
+        }
+    }
+
+    private FileFrame authorizeFileFrame(
+        final String sourceNodeId,
+        final String targetNodeId,
+        final ProtocolFrame frame
+    ) throws IOException {
+        final UUID transferId;
+        final boolean terminal;
+        if (frame.messageType() == MessageType.FILE_BEGIN) {
+            final FileTransferCodec.Begin begin = FileTransferCodec.decodeBegin(frame.payload());
+            final String[] path = begin.relativePath().split("/", 4);
+            if (path.length != 4 || !"transactions".equals(path[0]) || !"world".equals(path[2])) {
+                throw new IOException("file transfer path is not an authorized transaction tree");
+            }
+            final UUID transactionId;
+            try {
+                transactionId = UUID.fromString(path[1]);
+            } catch (final IllegalArgumentException exception) {
+                throw new IOException("file transfer transaction ID is invalid", exception);
+            }
+            this.requireFileRelay(transactionId, sourceNodeId, targetNodeId);
+            transferId = begin.transferId();
+            final FileRelay relay = new FileRelay(
+                transactionId, sourceNodeId, targetNodeId, deadline(RELAY_TIMEOUT)
+            );
+            if (this.fileRelays.putIfAbsent(transferId, relay) != null) {
+                throw new IOException("file transfer ID is already active");
+            }
+            this.expireFileRelay(transferId, relay);
+            terminal = false;
+        } else {
+            transferId = switch (frame.messageType()) {
+                case FILE_CHUNK -> FileTransferCodec.decodeChunk(frame.payload()).transferId();
+                case FILE_COMPLETE, FILE_ABORT -> FileTransferCodec.decodeTransferId(frame.payload());
+                default -> throw new IOException("unexpected file transfer relay message");
+            };
+            final FileRelay relay = this.fileRelays.get(transferId);
+            if (relay == null || !sourceNodeId.equals(relay.sourceNodeId())
+                || !targetNodeId.equals(relay.targetNodeId())) {
+                throw new IOException("file frame has no authorized transaction transfer");
+            }
+            final FileRelay refreshed = new FileRelay(
+                relay.transactionId(), relay.sourceNodeId(), relay.targetNodeId(), deadline(RELAY_TIMEOUT)
+            );
+            if (!this.fileRelays.replace(transferId, relay, refreshed)) {
+                throw new IOException("file transfer is no longer active");
+            }
+            this.expireFileRelay(transferId, refreshed);
+            terminal = frame.messageType() == MessageType.FILE_COMPLETE
+                || frame.messageType() == MessageType.FILE_ABORT;
+        }
+        return new FileFrame(transferId, terminal);
+    }
+
+    private void removeRelaysForNode(final String nodeId) {
+        this.remoteRelays.entrySet().removeIf(entry ->
+            nodeId.equals(entry.getValue().sourceNodeId()) || nodeId.equals(entry.getValue().targetNodeId())
+        );
+        this.fileRelays.entrySet().removeIf(entry ->
+            nodeId.equals(entry.getValue().sourceNodeId()) || nodeId.equals(entry.getValue().targetNodeId())
+        );
+        this.pendingFileFrames.entrySet().removeIf(entry ->
+            nodeId.equals(entry.getValue().sourceNodeId()) || nodeId.equals(entry.getValue().targetNodeId())
+        );
+    }
+
+    private void removeExpiredRelays() {
+        final long now = System.nanoTime();
+        this.remoteRelays.entrySet().removeIf(entry -> entry.getValue().expiresAtNanos() - now <= 0L);
+        this.fileRelays.entrySet().removeIf(entry -> entry.getValue().expiresAtNanos() - now <= 0L);
+        this.pendingFileFrames.entrySet().removeIf(entry -> entry.getValue().expiresAtNanos() - now <= 0L);
+    }
+
+    private void expireRemoteRelay(final UUID id, final RemoteRelay relay) {
+        CompletableFuture.delayedExecutor(RELAY_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+            .execute(() -> this.remoteRelays.remove(id, relay));
+    }
+
+    private void expireFileRelay(final UUID id, final FileRelay relay) {
+        CompletableFuture.delayedExecutor(RELAY_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+            .execute(() -> this.fileRelays.remove(id, relay));
+    }
+
+    private void expirePendingFileFrame(final UUID id, final PendingFileFrame pending) {
+        CompletableFuture.delayedExecutor(FILE_FRAME_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+            .execute(() -> this.pendingFileFrames.remove(id, pending));
+    }
+
+    private static long deadline(final Duration timeout) {
+        return System.nanoTime() + timeout.toNanos();
+    }
+
+    private void requireFileRelay(
+        final UUID transactionId,
+        final String sourceNodeId,
+        final String targetNodeId
+    ) throws IOException {
+        final WorldPlannerStore.TransactionPlan plan = this.worldPlannerStore.transaction(transactionId)
+            .orElseThrow(() -> new IOException("file transaction does not exist"));
+        if (!"BACKUPS_READY".equals(plan.state())) {
+            throw new IOException("file transaction is not in the relay phase");
+        }
+        final String sourceBackend = plan.session().backendId();
+        final String targetBackend;
+        if (sourceBackend.equals(plan.negativeBackendId())) {
+            targetBackend = plan.positiveBackendId();
+        } else if (sourceBackend.equals(plan.positiveBackendId())) {
+            targetBackend = plan.negativeBackendId();
+        } else {
+            throw new IOException("file transaction source is not one of its shard backends");
+        }
+        final String expectedSource = this.registry.nodeIdForTarget(sourceBackend).orElse("");
+        final String expectedTarget = this.registry.nodeIdForTarget(targetBackend).orElse("");
+        if (!sourceNodeId.equals(expectedSource) || !targetNodeId.equals(expectedTarget)) {
+            throw new IOException("file transaction node route does not match its immutable plan");
         }
     }
 
@@ -398,7 +631,7 @@ final class ControlServer implements AutoCloseable {
     }
 
     void boundaryTransferHandler(final BoundaryTransferHandler handler) {
-        this.boundaryTransferHandler = java.util.Objects.requireNonNull(handler, "handler");
+        this.boundaryTransferHandler = Objects.requireNonNull(handler, "handler");
     }
 
     private byte[] requestBoundaryTransfer(final String nodeId, final ProtocolFrame frame) throws IOException {
@@ -566,7 +799,28 @@ final class ControlServer implements AutoCloseable {
             new IOException("Velocity controller is shutting down")
         ));
         this.pendingTransactions.clear();
+        this.remoteRelays.clear();
+        this.fileRelays.clear();
+        this.pendingFileFrames.clear();
         this.acceptThread.interrupt();
+    }
+
+    private record RemoteRelay(String sourceNodeId, String targetNodeId, long expiresAtNanos) {
+    }
+
+    private record FileRelay(UUID transactionId, String sourceNodeId, String targetNodeId, long expiresAtNanos) {
+    }
+
+    private record FileFrame(UUID transferId, boolean terminal) {
+    }
+
+    private record PendingFileFrame(
+        String sourceNodeId,
+        String targetNodeId,
+        UUID transferId,
+        boolean terminal,
+        long expiresAtNanos
+    ) {
     }
 
     private record PendingTransaction(

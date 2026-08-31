@@ -74,17 +74,18 @@ final class TlsMaterial {
             "-keypass", password,
             "-ext", "SAN=dns:localhost,ip:127.0.0.1"
         ).redirectErrorStream(true).start();
-        final byte[] output;
         try {
-            output = process.getInputStream().readAllBytes();
             if (!process.waitFor(30, TimeUnit.SECONDS)) {
-                process.destroy();
+                process.destroyForcibly();
+                process.waitFor(5, TimeUnit.SECONDS);
                 throw new IOException("keytool timed out while generating the Shardingbase certificate");
             }
         } catch (final InterruptedException exception) {
+            process.destroyForcibly();
             Thread.currentThread().interrupt();
             throw new IOException("Interrupted while generating the Shardingbase certificate", exception);
         }
+        final byte[] output = process.getInputStream().readAllBytes();
         if (process.exitValue() != 0) {
             throw new IOException("keytool failed: " + new String(output, java.nio.charset.StandardCharsets.UTF_8));
         }

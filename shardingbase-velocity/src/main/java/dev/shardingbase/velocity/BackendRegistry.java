@@ -6,19 +6,19 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.Optional;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /** Transactional SQLite authority for the exactly-two-backend prototype. */
 final class BackendRegistry {
     private final String jdbcUrl;
 
     BackendRegistry(final Path databasePath) throws IOException {
+        SqliteSupport.ensureDriverLoaded();
         Files.createDirectories(databasePath.getParent());
         this.jdbcUrl = "jdbc:sqlite:" + databasePath.toAbsolutePath().normalize();
         try (Connection connection = this.connection()) {
@@ -318,11 +318,7 @@ final class BackendRegistry {
     }
 
     private Connection connection() throws SQLException {
-        final Connection connection = DriverManager.getConnection(this.jdbcUrl);
-        try (PreparedStatement statement = connection.prepareStatement("PRAGMA busy_timeout = 5000")) {
-            statement.execute();
-        }
-        return connection;
+        return SqliteSupport.open(this.jdbcUrl);
     }
 
     private static void ensureColumn(

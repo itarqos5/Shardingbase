@@ -4,14 +4,15 @@ import dev.shardingbase.protocol.MapPlannerCodec;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -22,6 +23,7 @@ final class WorldPlannerStore {
     private final SecureRandom random = new SecureRandom();
 
     WorldPlannerStore(final Path databasePath) throws IOException {
+        SqliteSupport.ensureDriverLoaded();
         this.jdbcUrl = "jdbc:sqlite:" + databasePath.toAbsolutePath().normalize();
         try (Connection connection = this.connection()) {
             connection.createStatement().executeUpdate("""
@@ -132,7 +134,7 @@ final class WorldPlannerStore {
     }
 
     synchronized String complete(final UUID sessionId) throws IOException {
-        final String token = token();
+        final String token = this.token();
         try (Connection connection = this.connection(); PreparedStatement statement = connection.prepareStatement("""
             UPDATE map_sessions SET link_token_hash = ?, state = 'READY'
             WHERE session_id = ? AND state = 'UPLOADING'
@@ -149,7 +151,7 @@ final class WorldPlannerStore {
     }
 
     synchronized Optional<Redeemed> redeem(final String linkToken) throws IOException {
-        final String browserToken = token();
+        final String browserToken = this.token();
         try (Connection connection = this.connection()) {
             connection.setAutoCommit(false);
             try (PreparedStatement find = connection.prepareStatement("""
@@ -329,7 +331,7 @@ final class WorldPlannerStore {
         if (states.length == 0) {
             return List.of();
         }
-        final String placeholders = String.join(",", java.util.Collections.nCopies(states.length, "?"));
+        final String placeholders = String.join(",", Collections.nCopies(states.length, "?"));
         final String sql = """
             SELECT
                 wt.transaction_id, wt.axis, wt.cut_chunk, wt.negative_backend_id, wt.positive_backend_id,
@@ -386,14 +388,7 @@ final class WorldPlannerStore {
     }
 
     private Connection connection() throws SQLException {
-        final Connection connection = DriverManager.getConnection(this.jdbcUrl);
-        try (PreparedStatement statement = connection.prepareStatement("PRAGMA busy_timeout = 5000")) {
-            statement.execute();
-        }
-        try (PreparedStatement statement = connection.prepareStatement("PRAGMA foreign_keys = ON")) {
-            statement.execute();
-        }
-        return connection;
+        return SqliteSupport.open(this.jdbcUrl);
     }
 
     private static void ensureColumn(
@@ -426,7 +421,7 @@ final class WorldPlannerStore {
     private static byte[] hash(final String value) {
         try {
             return MessageDigest.getInstance("SHA-256").digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        } catch (final java.security.NoSuchAlgorithmException exception) {
+        } catch (final NoSuchAlgorithmException exception) {
             throw new IllegalStateException(exception);
         }
     }

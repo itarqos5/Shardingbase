@@ -2,6 +2,8 @@ package dev.shardingbase.velocity;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpsConfigurator;
+import com.sun.net.httpserver.HttpsServer;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -16,6 +18,8 @@ import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 
 /** Token-authenticated, single-use world cut planner served from Velocity's dedicated web allocation. */
@@ -29,13 +33,14 @@ final class PlannerWebServer implements AutoCloseable {
     private final HttpServer server;
     private final ThreadPoolExecutor clients;
     private final boolean secureCookie;
-    private final java.util.function.Consumer<UUID> transactionStarter;
+    private final Consumer<UUID> transactionStarter;
 
     PlannerWebServer(
         final VelocityConfiguration configuration,
+        final TlsMaterial tlsMaterial,
         final WorldPlannerStore store,
         final BackendRegistry registry,
-        final java.util.function.Consumer<UUID> transactionStarter,
+        final Consumer<UUID> transactionStarter,
         final Logger logger
     ) throws IOException {
         this.store = store;
@@ -43,9 +48,16 @@ final class PlannerWebServer implements AutoCloseable {
         this.transactionStarter = transactionStarter;
         this.logger = logger;
         this.secureCookie = configuration.webPublicUrl().startsWith("https://");
-        this.server = HttpServer.create(new InetSocketAddress(
+        final InetSocketAddress address = new InetSocketAddress(
             InetAddress.getByName(configuration.webBindAddress()), configuration.webPort()
-        ), 64);
+        );
+        if (configuration.webTlsEnabled()) {
+            final HttpsServer httpsServer = HttpsServer.create(address, 64);
+            httpsServer.setHttpsConfigurator(new HttpsConfigurator(tlsMaterial.context()));
+            this.server = httpsServer;
+        } else {
+            this.server = HttpServer.create(address, 64);
+        }
         this.clients = new ThreadPoolExecutor(
             2,
             8,
@@ -90,7 +102,7 @@ final class PlannerWebServer implements AutoCloseable {
                 }
             }
             send(exchange, 404, "text/plain; charset=utf-8", "Not found.");
-        } catch (final IllegalArgumentException exception) {
+        } catch (IllegalArgumentException _) {
             send(exchange, 400, "text/plain; charset=utf-8", "Invalid planner request.");
         } catch (final IOException exception) {
             this.logger.warn("Shardingbase planner request failed", exception);
@@ -214,7 +226,7 @@ final class PlannerWebServer implements AutoCloseable {
         }
         final Map<String, String> form = form(new String(body, StandardCharsets.UTF_8));
         final Set<String> backendIds = this.registry.backends().stream()
-            .map(BackendRegistry.BackendTarget::serverId).collect(java.util.stream.Collectors.toUnmodifiableSet());
+            .map(BackendRegistry.BackendTarget::serverId).collect(Collectors.toUnmodifiableSet());
         final String negative = required(form, "negative");
         final String positive = required(form, "positive");
         if (!backendIds.contains(negative) || !backendIds.contains(positive)) {

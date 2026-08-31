@@ -1,6 +1,11 @@
 package dev.shardingbase.velocity;
 
+import dev.shardingbase.protocol.PlayerDataCategory;
+import dev.shardingbase.protocol.PlayerHandoffCodec;
+import dev.shardingbase.protocol.PlayerSnapshot;
 import java.nio.file.Path;
+import java.util.EnumSet;
+import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -8,11 +13,6 @@ import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import dev.shardingbase.protocol.PlayerDataCategory;
-import dev.shardingbase.protocol.PlayerHandoffCodec;
-import dev.shardingbase.protocol.PlayerSnapshot;
-import java.util.Map;
-import java.util.EnumSet;
 
 class PlayerStateStoreTest {
     @Test
