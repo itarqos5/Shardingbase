@@ -5,18 +5,24 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.BiPredicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Rewrites Anvil region files without decoding their compressed chunk payloads. */
+/** Rewrites Anvil region files without decoding or retaining their compressed chunk payloads. */
 final class RegionFileSplitter {
     static final int SECTOR_BYTES = 4096;
     static final int HEADER_BYTES = SECTOR_BYTES * 2;
+    private static final int COPY_BUFFER_BYTES = 64 * 1024;
+    private static final int EXTERNAL_STREAM_FLAG = 0x80;
     private static final Pattern REGION_NAME = Pattern.compile("r\\.(-?\\d+)\\.(-?\\d+)\\.mca");
 
     private RegionFileSplitter() {
@@ -30,42 +36,97 @@ final class RegionFileSplitter {
         final int cutChunk
     ) throws IOException {
         final RegionCoordinates region = coordinates(source);
-        final byte[] sourceBytes = Files.readAllBytes(source);
-        if (sourceBytes.length < HEADER_BYTES || sourceBytes.length % SECTOR_BYTES != 0) {
+        final long sourceBytes = Files.size(source);
+        if (sourceBytes < HEADER_BYTES || sourceBytes % SECTOR_BYTES != 0) {
             throw new IOException("Invalid Anvil region length: " + source);
         }
-        final ByteBuffer header = ByteBuffer.wrap(sourceBytes).order(ByteOrder.BIG_ENDIAN);
         final List<ChunkRecord> negative = new ArrayList<>();
         final List<ChunkRecord> positive = new ArrayList<>();
-        for (int index = 0; index < 1024; index++) {
-            final int location = header.getInt(index * Integer.BYTES);
-            final int sectorOffset = location >>> 8;
-            final int sectorCount = location & 0xFF;
-            if (sectorOffset == 0 && sectorCount == 0) {
+        final Set<String> sidecars = new HashSet<>();
+        try (FileChannel input = FileChannel.open(source, StandardOpenOption.READ)) {
+            final ByteBuffer header = ByteBuffer.allocate(HEADER_BYTES).order(ByteOrder.BIG_ENDIAN);
+            readFully(input, header, 0L, source);
+            header.flip();
+            for (int index = 0; index < 1024; index++) {
+                final int location = header.getInt(index * Integer.BYTES);
+                final int sectorOffset = location >>> 8;
+                final int sectorCount = location & 0xFF;
+                if (sectorOffset == 0 && sectorCount == 0) {
+                    continue;
+                }
+                if (sectorOffset < 2 || sectorCount < 1
+                    || ((long) sectorOffset + sectorCount) * SECTOR_BYTES > sourceBytes) {
+                    throw new IOException("Invalid chunk location at index " + index + " in " + source);
+                }
+                final int timestamp = header.getInt(SECTOR_BYTES + index * Integer.BYTES);
+                final int localX = index & 31;
+                final int localZ = index >>> 5;
+                final int chunkX = Math.addExact(Math.multiplyExact(region.x(), 32), localX);
+                final int chunkZ = Math.addExact(Math.multiplyExact(region.z(), 32), localZ);
+                final boolean external = validateRecord(input, source, index, sectorOffset, sectorCount);
+                final String sidecar = external ? sidecarName(chunkX, chunkZ) : null;
+                if (sidecar != null) {
+                    requireSidecar(source.resolveSibling(sidecar));
+                    sidecars.add(sidecar);
+                }
+                final ChunkRecord record = new ChunkRecord(index, timestamp, sectorOffset, sectorCount, sidecar);
+                if (ownsNegative(axis, cutChunk).test(chunkX, chunkZ)) {
+                    negative.add(record);
+                } else {
+                    positive.add(record);
+                }
+            }
+
+            write(input, source, negativeOutput, negative);
+            write(input, source, positiveOutput, positive);
+        } catch (final ArithmeticException exception) {
+            throw new IOException("Region coordinates overflow the supported chunk range: " + source, exception);
+        }
+        copySidecars(source, negativeOutput, negative);
+        copySidecars(source, positiveOutput, positive);
+        return new SplitResult(negative.size(), positive.size(), Set.copyOf(sidecars));
+    }
+
+    private static boolean validateRecord(
+        final FileChannel input,
+        final Path source,
+        final int index,
+        final int sectorOffset,
+        final int sectorCount
+    ) throws IOException {
+        final ByteBuffer prefix = ByteBuffer.allocate(Integer.BYTES + 1).order(ByteOrder.BIG_ENDIAN);
+        readFully(input, prefix, (long) sectorOffset * SECTOR_BYTES, source);
+        prefix.flip();
+        final int encodedLength = prefix.getInt();
+        if (encodedLength < 1 || encodedLength > sectorCount * SECTOR_BYTES - Integer.BYTES) {
+            throw new IOException("Invalid chunk payload length at index " + index + " in " + source);
+        }
+        return (prefix.get() & EXTERNAL_STREAM_FLAG) != 0;
+    }
+
+    private static void requireSidecar(final Path sidecar) throws IOException {
+        if (Files.isSymbolicLink(sidecar) || !Files.isRegularFile(sidecar, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("External Anvil chunk sidecar is missing or unsafe: " + sidecar);
+        }
+    }
+
+    private static void copySidecars(
+        final Path sourceRegion,
+        final Path outputRegion,
+        final List<ChunkRecord> chunks
+    ) throws IOException {
+        final Path outputDirectory = outputRegion.getParent();
+        for (final ChunkRecord chunk : chunks) {
+            if (chunk.sidecar() == null) {
                 continue;
             }
-            if (sectorOffset < 2 || sectorCount < 1 || (sectorOffset + sectorCount) * SECTOR_BYTES > sourceBytes.length) {
-                throw new IOException("Invalid chunk location at index " + index + " in " + source);
-            }
-            final int timestamp = header.getInt(SECTOR_BYTES + index * Integer.BYTES);
-            final byte[] sectors = new byte[sectorCount * SECTOR_BYTES];
-            System.arraycopy(sourceBytes, sectorOffset * SECTOR_BYTES, sectors, 0, sectors.length);
-            validateRecordLength(sectors, source, index);
-            final int localX = index & 31;
-            final int localZ = index >>> 5;
-            final int chunkX = region.x() * 32 + localX;
-            final int chunkZ = region.z() * 32 + localZ;
-            final ChunkRecord record = new ChunkRecord(index, timestamp, sectors);
-            if (ownsNegative(axis, cutChunk).test(chunkX, chunkZ)) {
-                negative.add(record);
-            } else {
-                positive.add(record);
-            }
+            Files.createDirectories(outputDirectory);
+            Files.copy(
+                sourceRegion.resolveSibling(chunk.sidecar()),
+                outputDirectory.resolve(chunk.sidecar()),
+                StandardCopyOption.COPY_ATTRIBUTES
+            );
         }
-
-        write(negativeOutput, negative);
-        write(positiveOutput, positive);
-        return new SplitResult(negative.size(), positive.size());
     }
 
     private static BiPredicate<Integer, Integer> ownsNegative(final ShardAxis axis, final int cutChunk) {
@@ -74,14 +135,12 @@ final class RegionFileSplitter {
             : (chunkX, chunkZ) -> chunkZ < cutChunk;
     }
 
-    private static void validateRecordLength(final byte[] sectors, final Path source, final int index) throws IOException {
-        final int encodedLength = ByteBuffer.wrap(sectors, 0, Integer.BYTES).order(ByteOrder.BIG_ENDIAN).getInt();
-        if (encodedLength < 1 || encodedLength > sectors.length - Integer.BYTES) {
-            throw new IOException("Invalid chunk payload length at index " + index + " in " + source);
-        }
-    }
-
-    private static void write(final Path output, final List<ChunkRecord> chunks) throws IOException {
+    private static void write(
+        final FileChannel input,
+        final Path source,
+        final Path output,
+        final List<ChunkRecord> chunks
+    ) throws IOException {
         if (chunks.isEmpty()) {
             Files.deleteIfExists(output);
             return;
@@ -92,35 +151,87 @@ final class RegionFileSplitter {
             final ByteBuffer header = ByteBuffer.allocate(HEADER_BYTES).order(ByteOrder.BIG_ENDIAN);
             int nextSector = 2;
             for (final ChunkRecord chunk : chunks) {
-                final int sectorCount = chunk.sectors().length / SECTOR_BYTES;
-                if (sectorCount > 255 || nextSector > 0xFFFFFF) {
+                if (chunk.sectorCount() > 255 || nextSector > 0xFFFFFF - chunk.sectorCount()) {
                     throw new IOException("Region output exceeds the Anvil location table limits: " + output);
                 }
-                header.putInt(chunk.index() * Integer.BYTES, nextSector << 8 | sectorCount);
+                header.putInt(chunk.index() * Integer.BYTES, nextSector << 8 | chunk.sectorCount());
                 header.putInt(SECTOR_BYTES + chunk.index() * Integer.BYTES, chunk.timestamp());
-                nextSector += sectorCount;
+                nextSector += chunk.sectorCount();
             }
-            try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
-                while (header.hasRemaining()) {
-                    channel.write(header);
-                }
-                for (final ChunkRecord chunk : chunks) {
-                    final ByteBuffer sectors = ByteBuffer.wrap(chunk.sectors());
-                    while (sectors.hasRemaining()) {
-                        channel.write(sectors);
-                    }
-                }
-                channel.force(true);
-            }
-            Files.move(
+            try (FileChannel target = FileChannel.open(
                 temporary,
-                output,
-                java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING
-            );
+                StandardOpenOption.WRITE,
+                StandardOpenOption.TRUNCATE_EXISTING
+            )) {
+                header.clear();
+                writeFully(target, header);
+                final ByteBuffer buffer = ByteBuffer.allocate(COPY_BUFFER_BYTES);
+                for (final ChunkRecord chunk : chunks) {
+                    copy(
+                        input,
+                        (long) chunk.sectorOffset() * SECTOR_BYTES,
+                        (long) chunk.sectorCount() * SECTOR_BYTES,
+                        target,
+                        buffer,
+                        source
+                    );
+                }
+                target.force(true);
+            }
+            Files.move(temporary, output, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } finally {
             Files.deleteIfExists(temporary);
         }
+    }
+
+    private static void copy(
+        final FileChannel input,
+        final long inputOffset,
+        final long length,
+        final FileChannel output,
+        final ByteBuffer buffer,
+        final Path source
+    ) throws IOException {
+        long position = inputOffset;
+        long remaining = length;
+        while (remaining > 0) {
+            buffer.clear();
+            buffer.limit((int) Math.min(buffer.capacity(), remaining));
+            final int read = input.read(buffer, position);
+            if (read < 1) {
+                throw new IOException("Unexpected end of Anvil region: " + source);
+            }
+            buffer.flip();
+            writeFully(output, buffer);
+            position += read;
+            remaining -= read;
+        }
+    }
+
+    private static void readFully(
+        final FileChannel channel,
+        final ByteBuffer target,
+        final long offset,
+        final Path source
+    ) throws IOException {
+        long position = offset;
+        while (target.hasRemaining()) {
+            final int read = channel.read(target, position);
+            if (read < 1) {
+                throw new IOException("Unexpected end of Anvil region: " + source);
+            }
+            position += read;
+        }
+    }
+
+    private static void writeFully(final FileChannel channel, final ByteBuffer source) throws IOException {
+        while (source.hasRemaining()) {
+            channel.write(source);
+        }
+    }
+
+    private static String sidecarName(final int chunkX, final int chunkZ) {
+        return "c." + chunkX + '.' + chunkZ + ".mcc";
     }
 
     private static RegionCoordinates coordinates(final Path source) throws IOException {
@@ -135,12 +246,12 @@ final class RegionFileSplitter {
         }
     }
 
-    record SplitResult(int negativeChunks, int positiveChunks) {
+    record SplitResult(int negativeChunks, int positiveChunks, Set<String> externalSidecars) {
     }
 
     private record RegionCoordinates(int x, int z) {
     }
 
-    private record ChunkRecord(int index, int timestamp, byte[] sectors) {
+    private record ChunkRecord(int index, int timestamp, int sectorOffset, int sectorCount, String sidecar) {
     }
 }

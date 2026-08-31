@@ -18,7 +18,9 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -50,9 +52,9 @@ final class ProxyValidationClient implements AutoCloseable {
     private static final int OUTBOUND_QUEUE_CAPACITY = 256;
 
     private final Map<String, String> environment;
-    private final ArrayBlockingQueue<ProtocolFrame> outbound = new ArrayBlockingQueue<>(OUTBOUND_QUEUE_CAPACITY);
-    private final ConcurrentHashMap<UUID, CompletableFuture<ProtocolFrame>> pending = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, PendingRequest> pending = new ConcurrentHashMap<>();
     private final AtomicReference<ActiveConnection> connection = new AtomicReference<>();
+    private final AtomicReference<String> connectionProblem = new AtomicReference<>();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final ExecutorService connectionExecutor;
     private final ScheduledExecutorService heartbeatExecutor;
@@ -72,9 +74,13 @@ final class ProxyValidationClient implements AutoCloseable {
             .daemon(true)
             .name("Shardingbase Proxy Heartbeat")
             .unstarted(task));
-        if (this.configurationAvailable()) {
+        final String configurationProblem = configurationProblem(this.environment);
+        this.connectionProblem.set(configurationProblem);
+        if (configurationProblem == null) {
             this.connectionExecutor.execute(this::connectLoop);
             this.heartbeatExecutor.scheduleAtFixedRate(this::heartbeat, 5, 5, TimeUnit.SECONDS);
+        } else {
+            System.err.println("Shardingbase proxy connection is disabled: " + configurationProblem);
         }
     }
 
@@ -84,10 +90,11 @@ final class ProxyValidationClient implements AutoCloseable {
         final String minecraftVersion,
         final String shardingbaseVersion
     ) throws IOException {
-        if (!this.configurationAvailable()) {
+        final String configurationProblem = configurationProblem(this.environment);
+        if (configurationProblem != null) {
             return new ValidationResponse(
                 false,
-                "node controller URI, credential, node ID, and certificate fingerprint are required",
+                configurationProblem,
                 "",
                 ""
             );
@@ -120,8 +127,9 @@ final class ProxyValidationClient implements AutoCloseable {
         if (this.closed.get()) {
             throw new IOException("Shardingbase proxy session is closed");
         }
-        if (this.connection.get() == null) {
-            throw new IOException("Shardingbase proxy session is not connected");
+        final ActiveConnection active = this.connection.get();
+        if (active == null) {
+            throw new IOException(this.unavailableMessage());
         }
         final UUID correlationId = UUID.randomUUID();
         final ProtocolFrame request = new ProtocolFrame(
@@ -134,9 +142,10 @@ final class ProxyValidationClient implements AutoCloseable {
             payload
         );
         final CompletableFuture<ProtocolFrame> response = new CompletableFuture<>();
-        this.pending.put(correlationId, response);
-        if (!this.outbound.offer(request)) {
-            this.pending.remove(correlationId);
+        final PendingRequest pendingRequest = new PendingRequest(active, response);
+        this.pending.put(correlationId, pendingRequest);
+        if (this.connection.get() != active || !active.enqueue(request)) {
+            this.pending.remove(correlationId, pendingRequest);
             throw new IOException("Shardingbase proxy outbound queue is full");
         }
         try {
@@ -153,7 +162,7 @@ final class ProxyValidationClient implements AutoCloseable {
             }
             throw new IOException("Shardingbase proxy request failed", cause);
         } finally {
-            this.pending.remove(correlationId);
+            this.pending.remove(correlationId, pendingRequest);
         }
     }
 
@@ -163,8 +172,9 @@ final class ProxyValidationClient implements AutoCloseable {
         final String targetId,
         final byte[] payload
     ) throws IOException {
-        if (this.closed.get() || this.connection.get() == null) {
-            throw new IOException("Shardingbase proxy session is not connected");
+        final ActiveConnection active = this.connection.get();
+        if (this.closed.get() || active == null) {
+            throw new IOException(this.unavailableMessage());
         }
         final ProtocolFrame frame = new ProtocolFrame(
             ShardingbaseProtocol.VERSION,
@@ -175,7 +185,7 @@ final class ProxyValidationClient implements AutoCloseable {
             targetId,
             payload
         );
-        if (!this.outbound.offer(frame)) {
+        if (this.connection.get() != active || !active.enqueue(frame)) {
             throw new IOException("Shardingbase proxy outbound queue is full");
         }
     }
@@ -188,8 +198,9 @@ final class ProxyValidationClient implements AutoCloseable {
     }
 
     void respond(final ProtocolFrame request, final MessageType messageType, final byte[] payload) throws IOException {
-        if (this.connection.get() == null) {
-            throw new IOException("Shardingbase proxy session is not connected");
+        final ActiveConnection active = this.connection.get();
+        if (active == null) {
+            throw new IOException(this.unavailableMessage());
         }
         final ProtocolFrame response = new ProtocolFrame(
             ShardingbaseProtocol.VERSION,
@@ -200,7 +211,7 @@ final class ProxyValidationClient implements AutoCloseable {
             request.sourceId(),
             payload
         );
-        if (!this.outbound.offer(response)) {
+        if (this.connection.get() != active || !active.enqueue(response)) {
             throw new IOException("Shardingbase proxy outbound queue is full");
         }
     }
@@ -217,10 +228,11 @@ final class ProxyValidationClient implements AutoCloseable {
                 attempt = 0;
             } catch (final IOException exception) {
                 if (!this.closed.get()) {
-                    System.err.println("Shardingbase proxy session disconnected: " + exception.getMessage());
+                    final String problem = failureMessage(exception);
+                    this.connectionProblem.set(problem);
+                    System.err.println("Shardingbase proxy connection failed for "
+                        + connectionDescription(this.environment) + ": " + problem);
                 }
-            } finally {
-                this.disconnect(new IOException("Shardingbase proxy session disconnected"));
             }
             if (!this.closed.get()) {
                 final long delaySeconds = Math.min(60, 1L << Math.min(attempt++, 6));
@@ -253,6 +265,9 @@ final class ProxyValidationClient implements AutoCloseable {
             this.authenticate(socket);
             final ActiveConnection active = new ActiveConnection(socket);
             this.connection.set(active);
+            this.connectionProblem.set(null);
+            System.out.println("Shardingbase proxy session connected to "
+                + uri.getHost() + ':' + uri.getPort() + " as " + this.nodeId() + '.');
             final Thread writer = Thread.ofPlatform()
                 .daemon(true)
                 .name("Shardingbase Proxy Writer")
@@ -260,9 +275,10 @@ final class ProxyValidationClient implements AutoCloseable {
             try {
                 while (!this.closed.get() && this.connection.get() == active) {
                     final ProtocolFrame frame = FrameCodec.read(socket.getInputStream());
-                    final CompletableFuture<ProtocolFrame> response = this.pending.remove(frame.correlationId());
-                    if (response != null) {
-                        response.complete(frame);
+                    final PendingRequest request = this.pending.get(frame.correlationId());
+                    if (request != null && request.connection() == active
+                        && this.pending.remove(frame.correlationId(), request)) {
+                        request.response().complete(frame);
                     } else {
                         final Consumer<ProtocolFrame> handler = this.pushHandlers.get(frame.channel());
                         if (handler == null) {
@@ -275,7 +291,7 @@ final class ProxyValidationClient implements AutoCloseable {
                     }
                 }
             } finally {
-                this.connection.compareAndSet(active, null);
+                this.disconnect(active, new IOException("Shardingbase proxy session disconnected"));
                 writer.interrupt();
             }
         } finally {
@@ -308,7 +324,7 @@ final class ProxyValidationClient implements AutoCloseable {
     private void writeLoop(final ActiveConnection active) {
         try {
             while (!this.closed.get() && this.connection.get() == active) {
-                final ProtocolFrame frame = this.outbound.poll(1, TimeUnit.SECONDS);
+                final ProtocolFrame frame = active.poll();
                 if (frame != null) {
                     active.write(frame);
                 }
@@ -335,28 +351,69 @@ final class ProxyValidationClient implements AutoCloseable {
                 throw new IOException("Unexpected heartbeat response");
             }
         } catch (IOException _) {
-            final ActiveConnection active = this.connection.getAndSet(null);
+            final ActiveConnection active = this.connection.get();
             if (active != null) {
-                active.close();
+                this.disconnect(active, new IOException("Shardingbase proxy heartbeat failed"));
             }
         }
     }
 
-    private void disconnect(final IOException failure) {
-        final ActiveConnection active = this.connection.getAndSet(null);
-        if (active != null) {
-            active.close();
-        }
-        this.outbound.clear();
-        this.pending.forEach((correlationId, future) -> future.completeExceptionally(failure));
-        this.pending.clear();
+    private void disconnect(final ActiveConnection active, final IOException failure) {
+        this.connection.compareAndSet(active, null);
+        active.close();
+        active.clear();
+        this.pending.forEach((correlationId, request) -> {
+            if (request.connection() == active && this.pending.remove(correlationId, request)) {
+                request.response().completeExceptionally(failure);
+            }
+        });
     }
 
-    private boolean configurationAvailable() {
-        return nonBlank(this.environment.get(CONTROLLER_URI_ENVIRONMENT_VARIABLE))
-            && nonBlank(this.environment.get(CERTIFICATE_FINGERPRINT_ENVIRONMENT_VARIABLE))
-            && nonBlank(this.environment.get(CREDENTIAL_ENVIRONMENT_VARIABLE))
-            && nonBlank(this.environment.get(NODE_ID_ENVIRONMENT_VARIABLE));
+    String connectionProblem() {
+        return this.connectionProblem.get();
+    }
+
+    private String unavailableMessage() {
+        final String problem = this.connectionProblem.get();
+        return problem == null
+            ? "Shardingbase proxy session is not connected yet"
+            : "Shardingbase proxy session is not connected: " + problem;
+    }
+
+    static String configurationProblem(final Map<String, String> environment) {
+        final List<String> missing = new ArrayList<>();
+        for (final String variable : List.of(
+            CONTROLLER_URI_ENVIRONMENT_VARIABLE,
+            CERTIFICATE_FINGERPRINT_ENVIRONMENT_VARIABLE,
+            CREDENTIAL_ENVIRONMENT_VARIABLE,
+            NODE_ID_ENVIRONMENT_VARIABLE
+        )) {
+            if (!nonBlank(environment.get(variable))) {
+                missing.add(variable);
+            }
+        }
+        if (!missing.isEmpty()) {
+            return "missing required setting(s): " + String.join(", ", missing);
+        }
+        try {
+            controllerUri(environment.get(CONTROLLER_URI_ENVIRONMENT_VARIABLE));
+        } catch (final IOException exception) {
+            return exception.getMessage();
+        }
+        if (normalizeFingerprint(environment.get(CERTIFICATE_FINGERPRINT_ENVIRONMENT_VARIABLE)) == null) {
+            return CERTIFICATE_FINGERPRINT_ENVIRONMENT_VARIABLE + " must contain exactly 64 hexadecimal characters";
+        }
+        return null;
+    }
+
+    private static String connectionDescription(final Map<String, String> environment) {
+        return environment.get(CONTROLLER_URI_ENVIRONMENT_VARIABLE)
+            + " as " + environment.get(NODE_ID_ENVIRONMENT_VARIABLE);
+    }
+
+    private static String failureMessage(final IOException failure) {
+        final String detail = failure.getMessage();
+        return detail == null || detail.isBlank() ? failure.getClass().getSimpleName() : detail;
     }
 
     private String nodeId() {
@@ -418,13 +475,17 @@ final class ProxyValidationClient implements AutoCloseable {
         if (!this.closed.compareAndSet(false, true)) {
             return;
         }
-        this.disconnect(new IOException("Shardingbase node is shutting down"));
+        final ActiveConnection active = this.connection.get();
+        if (active != null) {
+            this.disconnect(active, new IOException("Shardingbase node is shutting down"));
+        }
         this.heartbeatExecutor.shutdownNow();
         this.connectionExecutor.shutdownNow();
     }
 
     private static final class ActiveConnection {
         private final SSLSocket socket;
+        private final ArrayBlockingQueue<ProtocolFrame> outbound = new ArrayBlockingQueue<>(OUTBOUND_QUEUE_CAPACITY);
 
         private ActiveConnection(final SSLSocket socket) {
             this.socket = socket;
@@ -434,12 +495,27 @@ final class ProxyValidationClient implements AutoCloseable {
             FrameCodec.write(this.socket.getOutputStream(), frame);
         }
 
+        private boolean enqueue(final ProtocolFrame frame) {
+            return this.outbound.offer(frame);
+        }
+
+        private ProtocolFrame poll() throws InterruptedException {
+            return this.outbound.poll(1, TimeUnit.SECONDS);
+        }
+
+        private void clear() {
+            this.outbound.clear();
+        }
+
         private void close() {
             try {
                 this.socket.close();
             } catch (IOException _) {
             }
         }
+    }
+
+    private record PendingRequest(ActiveConnection connection, CompletableFuture<ProtocolFrame> response) {
     }
 
     private static final class PinningTrustManager implements X509TrustManager {

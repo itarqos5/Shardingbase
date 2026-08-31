@@ -9,38 +9,30 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.CodeSource;
-import java.util.Map;
 
 /**
  * Exports the bundled server without attempting to execute it in-process.
  */
 final class BackendExtractor {
-    static final String EMBEDDED_BACKEND_PATH = "/META-INF/shardingbase/Shardingbase-server.jar";
-    static final String EXPORTED_BACKEND_NAME = "Shardingbase-backend.jar";
-    static final String BACKEND_JAR_ENVIRONMENT = "SHARDINGBASE_BACKEND_JAR";
+    static final String EMBEDDED_BACKEND_PATH = "/META-INF/shardingbase/backend.jar";
+    static final Path EXPORTED_BACKEND_PATH = Path.of("cache", "backend.jar");
 
     private BackendExtractor() {
     }
 
     static ExtractionResult extractEmbeddedBackend() throws IOException, URISyntaxException {
+        return extractEmbeddedBackend(managerDirectory());
+    }
+
+    static ExtractionResult extractEmbeddedBackend(final Path managerDirectory) throws IOException {
         final InputStream resource = BackendExtractor.class.getResourceAsStream(EMBEDDED_BACKEND_PATH);
         if (resource == null) {
             throw new IOException("Manager JAR does not contain " + EMBEDDED_BACKEND_PATH);
         }
 
         try (resource) {
-            return extract(resource, managerDirectory().resolve(exportedBackendName(System.getenv())));
+            return extract(resource, managerDirectory.toAbsolutePath().normalize().resolve(EXPORTED_BACKEND_PATH));
         }
-    }
-
-    static String exportedBackendName(final Map<String, String> environment) throws IOException {
-        final String configured = environment.getOrDefault(BACKEND_JAR_ENVIRONMENT, EXPORTED_BACKEND_NAME).trim();
-        if (configured.isEmpty()
-            || !configured.endsWith(".jar")
-            || !Path.of(configured).getFileName().toString().equals(configured)) {
-            throw new IOException(BACKEND_JAR_ENVIRONMENT + " must be a plain .jar filename");
-        }
-        return configured;
     }
 
     static ExtractionResult extract(final InputStream source, final Path target) throws IOException {
@@ -74,7 +66,7 @@ final class BackendExtractor {
         }
     }
 
-    private static Path managerDirectory() throws URISyntaxException {
+    static Path managerDirectory() throws URISyntaxException {
         final CodeSource codeSource = ShardingbaseNode.class.getProtectionDomain().getCodeSource();
         if (codeSource != null) {
             final URL locationUrl = codeSource.getLocation();

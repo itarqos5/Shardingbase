@@ -5,6 +5,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -56,6 +57,57 @@ class RegionFileSplitterTest {
         assertEquals(3, summary.regionFiles());
         assertEquals(0, summary.negativeChunkEntries());
         assertEquals(3, summary.positiveChunkEntries());
+    }
+
+    @Test
+    void preservesCurrentPaperDimensionMetadataAndSkipsTransientLocks(@TempDir final Path directory) throws Exception {
+        final Path world = directory.resolve("world/dimensions/minecraft/overworld");
+        writeFixture(world.resolve("region/r.0.0.mca"), new int[] {0}, new int[] {0});
+        Files.createDirectories(world.resolve("data/paper"));
+        Files.writeString(world.resolve("paper-world.yml"), "version: 31");
+        Files.writeString(world.resolve("data/paper/uid.dat"), "world-id");
+        Files.writeString(world.resolve("session.lock"), "lock");
+        Files.createDirectories(directory.resolve("world/data/minecraft"));
+        Files.writeString(directory.resolve("world/data/minecraft/scoreboard.dat"), "shared-scoreboard");
+        Files.writeString(directory.resolve("world/level.dat"), "shared-level");
+
+        final Path negative = directory.resolve("negative");
+        final Path positive = directory.resolve("positive");
+        WorldSplitEngine.split(world, negative, positive, ShardAxis.X, 1);
+
+        for (final Path half : List.of(negative, positive)) {
+            assertEquals("version: 31", Files.readString(half.resolve("paper-world.yml")));
+            assertEquals("world-id", Files.readString(half.resolve("data/paper/uid.dat")));
+            assertEquals("shared-scoreboard", Files.readString(half.resolve(
+                ContainerMetadataEngine.BUNDLE_DIRECTORY + "/data/minecraft/scoreboard.dat"
+            )));
+            assertEquals("shared-level", Files.readString(half.resolve(
+                ContainerMetadataEngine.BUNDLE_DIRECTORY + "/level.dat"
+            )));
+            assertFalse(Files.exists(half.resolve("session.lock")));
+        }
+    }
+
+    @Test
+    void routesExternalChunkSidecarsToTheirOwningHalf(@TempDir final Path directory) throws Exception {
+        final Path world = directory.resolve("world");
+        final Path region = world.resolve("region/r.0.0.mca");
+        writeFixture(region, new int[] {0, 31}, new int[] {0, 0});
+        final byte[] bytes = Files.readAllBytes(region);
+        bytes[RegionFileSplitter.HEADER_BYTES + 4] = (byte) 0x83;
+        bytes[RegionFileSplitter.HEADER_BYTES + RegionFileSplitter.SECTOR_BYTES + 4] = (byte) 0x83;
+        Files.write(region, bytes);
+        Files.writeString(region.resolveSibling("c.0.0.mcc"), "negative");
+        Files.writeString(region.resolveSibling("c.31.0.mcc"), "positive");
+
+        final Path negative = directory.resolve("negative");
+        final Path positive = directory.resolve("positive");
+        WorldSplitEngine.split(world, negative, positive, ShardAxis.X, 16);
+
+        assertEquals("negative", Files.readString(negative.resolve("region/c.0.0.mcc")));
+        assertFalse(Files.exists(negative.resolve("region/c.31.0.mcc")));
+        assertEquals("positive", Files.readString(positive.resolve("region/c.31.0.mcc")));
+        assertFalse(Files.exists(positive.resolve("region/c.0.0.mcc")));
     }
 
     @Test

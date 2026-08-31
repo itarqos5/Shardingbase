@@ -6,6 +6,7 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -195,10 +196,102 @@ class WorldTransactionSafetyTest {
             world,
             installed.retiredOriginal(),
             false,
-            transaction.resolve("target-failed")
+            transaction.resolve("target-failed"),
+            transaction,
+            "target"
         );
         assertEquals("original", Files.readString(world.resolve("level.dat")));
         assertEquals("sharded", Files.readString(transaction.resolve("target-failed/level.dat")));
+    }
+
+    @Test
+    void recoversEveryDurableWorldInstallRenameWindow(@TempDir final Path directory) throws Exception {
+        for (final String point : List.of("before-first", "after-first", "after-second")) {
+            final Path root = directory.resolve(point);
+            final Path world = root.resolve("world");
+            final Path transaction = root.resolve("transaction");
+            final Path install = transaction.resolve("target-install");
+            final Path original = transaction.resolve("target-original");
+            Files.createDirectories(world);
+            Files.createDirectories(install);
+            Files.writeString(world.resolve("level.dat"), "original");
+            Files.writeString(install.resolve("level.dat"), "sharded");
+            TransferTreeManifest.write(install);
+            Files.writeString(install.resolve(ShardManifestWriter.FILE_NAME), "immutable ownership");
+            WorldInstallationEngine.writeIntent(world, transaction, "target", true);
+            if (!"before-first".equals(point)) {
+                Files.move(world, original);
+            }
+            if ("after-second".equals(point)) {
+                Files.move(install, world);
+            }
+
+            final WorldInstallationEngine.InstalledWorld recovered = WorldInstallationEngine.recover(
+                world,
+                transaction,
+                "target"
+            ).orElseThrow();
+
+            assertEquals("sharded", Files.readString(world.resolve("level.dat")));
+            assertEquals("original", Files.readString(recovered.retiredOriginal().resolve("level.dat")));
+            assertFalse(Files.exists(install));
+        }
+    }
+
+    @Test
+    void installsAndIdempotentlyRollsBackNestedContainerMetadata(@TempDir final Path directory) throws Exception {
+        final Path container = directory.resolve("runtime/world");
+        final Path world = container.resolve("dimensions/minecraft/overworld");
+        final Path prepared = directory.resolve("prepared");
+        final Path transaction = directory.resolve("transaction");
+        Files.createDirectories(world);
+        Files.createDirectories(container.resolve("data/minecraft"));
+        Files.createDirectories(prepared.resolve(ContainerMetadataEngine.BUNDLE_DIRECTORY + "/data/minecraft"));
+        Files.createDirectories(transaction);
+        Files.writeString(world.resolve("dimension.dat"), "original-dimension");
+        Files.writeString(container.resolve("data/minecraft/scoreboard.dat"), "original-scoreboard");
+        Files.writeString(prepared.resolve("dimension.dat"), "sharded-dimension");
+        Files.writeString(prepared.resolve(
+            ContainerMetadataEngine.BUNDLE_DIRECTORY + "/data/minecraft/scoreboard.dat"
+        ), "source-scoreboard");
+        TransferTreeManifest.write(prepared);
+
+        final WorldInstallationEngine.InstalledWorld installed = WorldInstallationEngine.install(
+            world,
+            prepared,
+            transaction,
+            "target",
+            new ShardManifestWriter.Manifest(
+                "minecraft:overworld",
+                UUID.randomUUID(),
+                UUID.randomUUID(),
+                ShardAxis.X,
+                0,
+                ShardSide.POSITIVE,
+                "peer"
+            )
+        );
+
+        assertEquals("sharded-dimension", Files.readString(world.resolve("dimension.dat")));
+        assertEquals("source-scoreboard", Files.readString(container.resolve("data/minecraft/scoreboard.dat")));
+
+        final Path failed = transaction.resolve("target-failed");
+        WorldInstallationEngine.rollback(
+            world,
+            installed.retiredOriginal(),
+            false,
+            failed,
+            transaction,
+            "target"
+        );
+
+        assertEquals("original-dimension", Files.readString(world.resolve("dimension.dat")));
+        assertEquals("original-scoreboard", Files.readString(container.resolve("data/minecraft/scoreboard.dat")));
+        assertEquals("source-scoreboard", Files.readString(
+            transaction.resolve("target-container-failed/data/minecraft/scoreboard.dat")
+        ));
+        assertTrue(WorldInstallationEngine.recover(world, transaction, "target").isEmpty());
+        assertTrue(WorldInstallationEngine.recover(world, transaction, "target").isEmpty());
     }
 
     private static void writeRegion(final Path path) throws IOException {

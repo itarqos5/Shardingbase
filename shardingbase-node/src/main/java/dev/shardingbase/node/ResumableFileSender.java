@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.UUID;
@@ -52,7 +53,7 @@ final class ResumableFileSender {
         final String targetPath,
         final String targetNodeId
     ) throws IOException {
-        final long size = java.nio.file.Files.size(file);
+        final long size = Files.size(file);
         Ack acknowledgement = this.ack(this.proxy.request(
             ProtocolChannel.FILE_TRANSFER,
             MessageType.FILE_BEGIN,

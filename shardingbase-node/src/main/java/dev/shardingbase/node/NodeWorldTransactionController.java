@@ -1,14 +1,17 @@
 package dev.shardingbase.node;
 
-import dev.shardingbase.node.world.OfflineWorldTransactionPreparer;
+import dev.shardingbase.node.world.ContainerMetadataEngine;
 import dev.shardingbase.node.world.OfflineTargetTransactionPreparer;
+import dev.shardingbase.node.world.OfflineWorldTransactionPreparer;
 import dev.shardingbase.node.world.ShardAxis;
 import dev.shardingbase.node.world.ShardManifestWriter;
 import dev.shardingbase.node.world.ShardSide;
-import dev.shardingbase.node.world.TransferTreeManifest;
-import dev.shardingbase.node.world.WorldInstallationEngine;
-import dev.shardingbase.node.world.WorldTransactionJournal;
 import dev.shardingbase.node.world.TransactionPhase;
+import dev.shardingbase.node.world.TransferTreeManifest;
+import dev.shardingbase.node.world.WorldBackupEngine.BackupResult;
+import dev.shardingbase.node.world.WorldInstallationEngine;
+import dev.shardingbase.node.world.WorldSplitEngine.SplitSummary;
+import dev.shardingbase.node.world.WorldTransactionJournal;
 import dev.shardingbase.protocol.MessageType;
 import dev.shardingbase.protocol.ProtocolChannel;
 import dev.shardingbase.protocol.ProtocolFrame;
@@ -20,19 +23,21 @@ import dev.shardingbase.protocol.WorldTransactionCodec.Outcome;
 import dev.shardingbase.protocol.WorldTransactionCodec.Request;
 import dev.shardingbase.protocol.WorldTransactionCodec.Response;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.StandardCopyOption;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Base64;
-import java.util.Map;
-import java.util.UUID;
 import java.util.HexFormat;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -137,7 +142,7 @@ final class NodeWorldTransactionController implements AutoCloseable {
     private void submit(final ProtocolFrame frame) {
         try {
             this.worker.execute(() -> this.process(frame));
-        } catch (final RuntimeException exception) {
+        } catch (RuntimeException _) {
             this.respondFailure(frame, null, Operation.STATUS, "transaction worker is unavailable");
         }
     }
@@ -145,6 +150,9 @@ final class NodeWorldTransactionController implements AutoCloseable {
     private void process(final ProtocolFrame frame) {
         Request request = null;
         try {
+            if (!"velocity".equals(frame.sourceId()) || !this.nodeId.equals(frame.targetId())) {
+                throw new IOException("only Velocity may originate a world transaction request");
+            }
             if (frame.messageType() != MessageType.WORLD_TRANSACTION_REQUEST) {
                 throw new IOException("unexpected world transaction message type");
             }
@@ -235,7 +243,7 @@ final class NodeWorldTransactionController implements AutoCloseable {
     private Response stop(final Request request) throws IOException {
         this.requireAuthorization(request);
         try {
-            if (!this.backend.stopGracefully()) {
+            if (!this.backend.stopForTransaction()) {
                 return this.status(request, Outcome.REJECTED,
                     "backend did not stop within 60 seconds; no force-kill was attempted");
             }
@@ -264,7 +272,11 @@ final class NodeWorldTransactionController implements AutoCloseable {
         }
         Files.createDirectories(this.backupRoot);
         Files.createDirectories(this.transactionRoot);
-        final long required = safetyMargin(saturatedAdd(directoryBytes(world), manifest.estimatedBytes()));
+        final long worldBytes = directoryBytes(world);
+        final long metadataBytes = ContainerMetadataEngine.sourceBytes(world);
+        final long required = safetyMargin(saturatedAdd(
+            saturatedMultiply(worldBytes, 4L), saturatedMultiply(metadataBytes, 3L)
+        ));
         final long usable = usableBytes(this.backupRoot);
         if (usable < required) {
             return this.status(request, Outcome.REJECTED,
@@ -344,7 +356,11 @@ final class NodeWorldTransactionController implements AutoCloseable {
         Files.createDirectories(this.backupRoot);
         Files.createDirectories(this.transactionRoot);
         final long existingBytes = Files.isDirectory(world) ? directoryBytes(world) : 0L;
-        final long required = safetyMargin(saturatedAdd(existingBytes, manifest.estimatedBytes()));
+        final long metadataBytes = ContainerMetadataEngine.sourceBytes(world);
+        final long required = safetyMargin(saturatedAdd(
+            saturatedAdd(existingBytes, metadataBytes),
+            saturatedMultiply(manifest.estimatedBytes(), 2L)
+        ));
         if (usableBytes(this.backupRoot) < required) {
             return this.status(request, Outcome.REJECTED,
                 "insufficient target backup/staging space: requires " + required + " bytes with safety margin");
@@ -415,6 +431,16 @@ final class NodeWorldTransactionController implements AutoCloseable {
         }
         this.recoverInstalled(manifest, false);
         if (this.installed.containsKey(manifest.transactionId())) {
+            final WorldTransactionJournal journal = WorldTransactionJournal.load(prepared.journal());
+            if (journal.phase() == TransactionPhase.BACKUP_COMPLETE) {
+                journal.advance(TransactionPhase.TARGET_PREPARED);
+            } else if (journal.phase() != TransactionPhase.TARGET_PREPARED
+                && journal.phase() != TransactionPhase.SOURCE_COMMITTED
+                && journal.phase() != TransactionPhase.STARTING_TARGET
+                && journal.phase() != TransactionPhase.STARTING_SOURCE
+                && journal.phase() != TransactionPhase.COMPLETE) {
+                throw new IOException("Recovered target install has incompatible journal phase " + journal.phase());
+            }
             return this.status(request, Outcome.SUCCESS, "target shard is already installed");
         }
         final Path staged = this.stagingRoot.resolve(
@@ -430,7 +456,7 @@ final class NodeWorldTransactionController implements AutoCloseable {
             staged,
             transactionDirectory,
             "target",
-            shardManifest(manifest, false)
+            this.shardManifest(manifest, false)
         );
         final WorldTransactionJournal journal = WorldTransactionJournal.load(prepared.journal());
         journal.advance(TransactionPhase.TARGET_PREPARED);
@@ -458,6 +484,18 @@ final class NodeWorldTransactionController implements AutoCloseable {
         }
         this.recoverInstalled(manifest, true);
         if (this.installed.containsKey(manifest.transactionId())) {
+            final WorldTransactionJournal journal = WorldTransactionJournal.load(prepared.journal());
+            if (journal.phase() == TransactionPhase.SPLIT_COMPLETE) {
+                journal.advance(TransactionPhase.TARGET_PREPARED);
+            }
+            if (journal.phase() == TransactionPhase.TARGET_PREPARED) {
+                journal.advance(TransactionPhase.SOURCE_COMMITTED);
+            } else if (journal.phase() != TransactionPhase.SOURCE_COMMITTED
+                && journal.phase() != TransactionPhase.STARTING_TARGET
+                && journal.phase() != TransactionPhase.STARTING_SOURCE
+                && journal.phase() != TransactionPhase.COMPLETE) {
+                throw new IOException("Recovered source install has incompatible journal phase " + journal.phase());
+            }
             return this.status(request, Outcome.SUCCESS, "source shard is already committed");
         }
         final Path localHalf = this.nodeId.equals(manifest.negativeNodeId())
@@ -476,7 +514,7 @@ final class NodeWorldTransactionController implements AutoCloseable {
             localHalf,
             prepared.journal().getParent(),
             "source",
-            shardManifest(manifest, true)
+            this.shardManifest(manifest, true)
         );
         journal.advance(TransactionPhase.SOURCE_COMMITTED);
         this.installed.put(manifest.transactionId(), new InstalledRecord(
@@ -502,16 +540,25 @@ final class NodeWorldTransactionController implements AutoCloseable {
             return this.status(request, Outcome.SUCCESS, "no local transaction state required rollback");
         }
         this.claim(manifest.transactionId());
-        this.recoverInstalled(manifest, this.nodeId.equals(manifest.sourceNodeId()));
+        final String role = this.nodeId.equals(manifest.sourceNodeId()) ? "source" : "target";
+        final Path transactionDirectory = this.transactionRoot.resolve(manifest.transactionId().toString());
+        final Path failed = transactionDirectory.resolve(role + "-failed");
+        final boolean durableRollback = WorldInstallationEngine.rollbackPending(
+            this.resolveWorld(manifest.worldDirectory()), transactionDirectory, role, failed
+        );
         final InstalledRecord record = this.installed.remove(manifest.transactionId());
         Path journalPath = null;
-        if (record != null) {
-            final Path failed = record.journal().getParent().resolve(record.role() + "-failed");
+        if (durableRollback) {
+            journalPath = transactionDirectory.resolve("journal.properties");
+        } else if (record != null) {
+            final Path legacyFailed = record.journal().getParent().resolve(record.role() + "-failed");
             WorldInstallationEngine.rollback(
                 this.resolveWorld(manifest.worldDirectory()),
                 record.world().retiredOriginal(),
                 record.worldInitiallyAbsent(),
-                failed
+                legacyFailed,
+                record.journal().getParent(),
+                record.role()
             );
             journalPath = record.journal();
         } else if (this.nodeId.equals(manifest.sourceNodeId())) {
@@ -691,18 +738,21 @@ final class NodeWorldTransactionController implements AutoCloseable {
             && phase != TransactionPhase.SOURCE_COMMITTED
             && phase != TransactionPhase.STARTING_TARGET
             && phase != TransactionPhase.STARTING_SOURCE
-            && phase != TransactionPhase.COMPLETE
-            && phase != TransactionPhase.ROLLED_BACK) {
+            && phase != TransactionPhase.COMPLETE) {
             return null;
         }
         final Path backup = this.backupRoot.resolve(manifest.transactionId().toString());
+        final Path negative = directory.resolve("negative");
+        final Path positive = directory.resolve("positive");
+        TransferTreeManifest.verify(negative);
+        TransferTreeManifest.verify(positive);
         final OfflineWorldTransactionPreparer.PreparedTransaction recovered =
             new OfflineWorldTransactionPreparer.PreparedTransaction(
                 journalPath,
-                new dev.shardingbase.node.world.WorldBackupEngine.BackupResult(backup, 0L, 0L),
-                directory.resolve("negative"),
-                directory.resolve("positive"),
-                new dev.shardingbase.node.world.WorldSplitEngine.SplitSummary(0, 0, 0)
+                new BackupResult(backup, 0L, 0L),
+                negative,
+                positive,
+                new SplitSummary(0, 0, 0)
             );
         this.prepared.put(manifest.transactionId(), recovered);
         return recovered;
@@ -734,7 +784,7 @@ final class NodeWorldTransactionController implements AutoCloseable {
         final OfflineTargetTransactionPreparer.PreparedTarget recovered =
             new OfflineTargetTransactionPreparer.PreparedTarget(
                 journalPath,
-                new dev.shardingbase.node.world.WorldBackupEngine.BackupResult(backup, 0L, 0L),
+                new BackupResult(backup, 0L, 0L),
                 Files.isRegularFile(backup.resolve("world.absent"))
             );
         this.preparedTargets.put(manifest.transactionId(), recovered);
@@ -746,27 +796,36 @@ final class NodeWorldTransactionController implements AutoCloseable {
             return;
         }
         final Path world = this.resolveWorld(manifest.worldDirectory());
+        final Path journal = this.transactionRoot.resolve(manifest.transactionId().toString())
+            .resolve("journal.properties");
+        final String role = source ? "source" : "target";
+        final Optional<WorldInstallationEngine.InstalledWorld> recovered =
+            WorldInstallationEngine.recover(world, journal.getParent(), role);
         final Path shardManifest = world.resolve(ShardManifestWriter.FILE_NAME);
         if (!Files.isRegularFile(shardManifest)) {
-            return;
+            if (recovered.isEmpty()) {
+                return;
+            }
+            throw new IOException("Recovered world installation is missing its ownership manifest");
         }
         final Properties properties = new Properties();
-        try (java.io.InputStream input = Files.newInputStream(shardManifest)) {
+        try (InputStream input = Files.newInputStream(shardManifest)) {
             properties.load(input);
         }
         if (!manifest.transactionId().toString().equals(properties.getProperty("transaction-id"))) {
-            return;
+            throw new IOException("Installed shard ownership belongs to a different transaction");
         }
-        final Path journal = this.transactionRoot.resolve(manifest.transactionId().toString())
-            .resolve("journal.properties");
-        final Path retired = journal.getParent().resolve((source ? "source" : "target") + "-original");
         final boolean absent = !source
             && Files.isRegularFile(this.backupRoot.resolve(manifest.transactionId().toString()).resolve("world.absent"));
+        final Path retired = journal.getParent().resolve(role + "-original");
         this.installed.put(manifest.transactionId(), new InstalledRecord(
-            new WorldInstallationEngine.InstalledWorld(world, Files.exists(retired) ? retired : null),
+            recovered.orElseGet(() -> new WorldInstallationEngine.InstalledWorld(
+                world,
+                Files.exists(retired) ? retired : null
+            )),
             absent,
             journal,
-            source ? "source" : "target"
+            role
         ));
     }
 
@@ -820,7 +879,7 @@ final class NodeWorldTransactionController implements AutoCloseable {
                     digest
                 )
             ));
-        } catch (final IOException ignored) {
+        } catch (IOException _) {
         }
     }
 
@@ -858,6 +917,13 @@ final class NodeWorldTransactionController implements AutoCloseable {
             return Long.MAX_VALUE;
         }
         return left + right;
+    }
+
+    private static long saturatedMultiply(final long value, final long multiplier) {
+        if (value < 0L || multiplier < 0L || value > Long.MAX_VALUE / multiplier) {
+            return Long.MAX_VALUE;
+        }
+        return value * multiplier;
     }
 
     private static long usableBytes(final Path path) throws IOException {

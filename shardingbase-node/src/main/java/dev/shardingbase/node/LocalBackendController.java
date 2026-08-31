@@ -2,6 +2,7 @@ package dev.shardingbase.node;
 
 import dev.shardingbase.protocol.FrameCodec;
 import dev.shardingbase.protocol.MessageType;
+import dev.shardingbase.protocol.ProtocolChannel;
 import dev.shardingbase.protocol.ProtocolFrame;
 import dev.shardingbase.protocol.ShardingbaseProtocol;
 import dev.shardingbase.protocol.ValidationPayloadCodec;
@@ -20,12 +21,12 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.ConcurrentHashMap;
-import dev.shardingbase.protocol.ProtocolChannel;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Authenticated loopback service exposed only to the backend child. */
@@ -36,6 +37,7 @@ final class LocalBackendController implements AutoCloseable {
     private final String token;
     private final ProxyValidationClient proxyClient;
     private final ExecutorService clients;
+    private final Semaphore clientCapacity = new Semaphore(32);
     private final AtomicBoolean closed = new AtomicBoolean();
     private final ConcurrentHashMap<ProtocolChannel, ArrayBlockingQueue<ProtocolFrame>> backendPushes =
         new ConcurrentHashMap<>();
@@ -48,10 +50,9 @@ final class LocalBackendController implements AutoCloseable {
         final byte[] tokenBytes = new byte[32];
         new SecureRandom().nextBytes(tokenBytes);
         this.token = Base64.getUrlEncoder().withoutPadding().encodeToString(tokenBytes);
-        this.clients = Executors.newFixedThreadPool(2, task -> Thread.ofPlatform()
-            .daemon(true)
+        this.clients = Executors.newThreadPerTaskExecutor(Thread.ofVirtual()
             .name("Shardingbase Local Control Client")
-            .unstarted(task));
+            .factory());
         this.acceptThread = Thread.ofPlatform()
             .daemon(true)
             .name("Shardingbase Local Control")
@@ -96,7 +97,23 @@ final class LocalBackendController implements AutoCloseable {
         while (!this.closed.get()) {
             try {
                 final Socket socket = this.serverSocket.accept();
-                this.clients.execute(() -> this.handle(socket));
+                if (!this.clientCapacity.tryAcquire()) {
+                    socket.close();
+                    continue;
+                }
+                try {
+                    this.clients.execute(() -> {
+                        try {
+                            this.handle(socket);
+                        } finally {
+                            this.clientCapacity.release();
+                        }
+                    });
+                } catch (final RuntimeException exception) {
+                    this.clientCapacity.release();
+                    socket.close();
+                    throw exception;
+                }
             } catch (final IOException exception) {
                 if (!this.closed.get()) {
                     System.err.println("Shardingbase local control accept failed: " + exception.getMessage());

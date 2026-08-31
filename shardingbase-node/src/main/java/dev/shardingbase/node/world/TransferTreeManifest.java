@@ -15,6 +15,7 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /** Exact file-set and SHA-256 manifest for one relayed shard tree. */
 public final class TransferTreeManifest {
@@ -51,6 +52,10 @@ public final class TransferTreeManifest {
     }
 
     public static Summary verify(final Path treeRoot) throws IOException {
+        return verify(treeRoot, Set.of());
+    }
+
+    static Summary verify(final Path treeRoot, final Set<String> allowedAdditionalFiles) throws IOException {
         final Path root = requireRoot(treeRoot);
         final Path manifest = root.resolve(FILE_NAME);
         if (!Files.isRegularFile(manifest)) {
@@ -77,22 +82,25 @@ public final class TransferTreeManifest {
             expected.put(fields[2], new Entry(size, HexFormat.of().parseHex(fields[0])));
         }
         final List<Path> actualFiles = files(root);
-        if (actualFiles.size() != expected.size()) {
-            throw new IOException("Relayed shard file set does not match its transfer manifest");
-        }
         long bytes = 0L;
+        int files = 0;
         for (final Path file : actualFiles) {
-            final Entry entry = expected.remove(relative(root, file));
+            final String relative = relative(root, file);
+            if (allowedAdditionalFiles.contains(relative)) {
+                continue;
+            }
+            final Entry entry = expected.remove(relative);
             if (entry == null || Files.size(file) != entry.size()
                 || !MessageDigest.isEqual(entry.sha256(), sha256(file))) {
-                throw new IOException("Relayed shard file failed manifest verification: " + relative(root, file));
+                throw new IOException("Relayed shard file failed manifest verification: " + relative);
             }
             bytes = Math.addExact(bytes, entry.size());
+            files++;
         }
         if (!expected.isEmpty()) {
             throw new IOException("Relayed shard manifest references missing files");
         }
-        return new Summary(actualFiles.size(), bytes);
+        return new Summary(files, bytes);
     }
 
     public static List<Path> filesForTransfer(final Path treeRoot) throws IOException {

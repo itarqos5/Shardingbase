@@ -119,9 +119,14 @@ public final class WorldTransactionJournal {
         transitions.put(TransactionPhase.BACKUP_COMPLETE, EnumSet.of(
             TransactionPhase.SPLIT_COMPLETE,
             TransactionPhase.TARGET_PREPARED,
-            TransactionPhase.ROLLED_BACK
+            TransactionPhase.ROLLED_BACK,
+            TransactionPhase.FAILED
         ));
-        transitions.put(TransactionPhase.SPLIT_COMPLETE, EnumSet.of(TransactionPhase.TARGET_PREPARED, TransactionPhase.ROLLED_BACK));
+        transitions.put(TransactionPhase.SPLIT_COMPLETE, EnumSet.of(
+            TransactionPhase.TARGET_PREPARED,
+            TransactionPhase.ROLLED_BACK,
+            TransactionPhase.FAILED
+        ));
         transitions.put(TransactionPhase.TARGET_PREPARED, EnumSet.of(TransactionPhase.SOURCE_COMMITTED, TransactionPhase.ROLLED_BACK));
         transitions.put(TransactionPhase.SOURCE_COMMITTED, EnumSet.of(TransactionPhase.STARTING_TARGET, TransactionPhase.ROLLED_BACK));
         transitions.put(TransactionPhase.STARTING_TARGET, EnumSet.of(TransactionPhase.STARTING_SOURCE, TransactionPhase.ROLLED_BACK));

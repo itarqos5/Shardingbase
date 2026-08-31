@@ -4,16 +4,11 @@ import dev.shardingbase.protocol.ShardingbaseProtocol;
 import java.io.IOException;
 import java.net.URISyntaxException;
 import java.nio.file.Path;
-import java.util.Arrays;
-import java.util.Set;
-import java.util.concurrent.CountDownLatch;
 
 /**
  * Entry point for the backend supervisor and transaction agent.
  */
 public final class ShardingbaseNode {
-    private static final Set<String> ONE_SHOT_ARGUMENTS = Set.of("--help", "-h", "-?", "--version");
-
     private ShardingbaseNode() {
     }
 
@@ -24,7 +19,9 @@ public final class ShardingbaseNode {
         }
 
         try {
-            final BackendExtractor.ExtractionResult extraction = BackendExtractor.extractEmbeddedBackend();
+            final Path managerDirectory = BackendExtractor.managerDirectory();
+            final BackendExtractor.ExtractionResult extraction =
+                BackendExtractor.extractEmbeddedBackend(managerDirectory);
             final String action = extraction.updated() ? "exported" : "already current";
             System.out.println("Shardingbase backend " + action + " at " + extraction.path());
 
@@ -37,7 +34,12 @@ public final class ShardingbaseNode {
                 ProxyValidationClient proxyClient = new ProxyValidationClient();
                 NodeFileTransferHandler fileTransfers = new NodeFileTransferHandler(proxyClient, stagingRoot());
                 LocalBackendController controller = LocalBackendController.start(proxyClient);
-                BackendProcess backend = BackendProcess.launch(extraction.path(), args, controller.childEnvironment());
+                BackendProcess backend = BackendProcess.launch(
+                    extraction.path(),
+                    managerDirectory,
+                    args,
+                    controller.childEnvironment()
+                );
                 NodeWorldTransactionController transactions =
                     NodeWorldTransactionController.start(proxyClient, controller, backend)
             ) {
@@ -47,11 +49,7 @@ public final class ShardingbaseNode {
                 if (exitCode != 0) {
                     System.exit(exitCode);
                 }
-                if (!isOneShot(args)) {
-                    System.out.println("Shardingbase node remains online while the backend is stopped.");
-                    System.out.println("Stop or restart the node process through your process manager to continue.");
-                    new CountDownLatch(1).await();
-                }
+                System.out.println("Shardingbase supervisor is stopping because the backend stopped.");
             }
         } catch (InterruptedException _) {
             Thread.currentThread().interrupt();
@@ -62,10 +60,6 @@ public final class ShardingbaseNode {
             exception.printStackTrace(System.err);
             System.exit(1);
         }
-    }
-
-    static boolean isOneShot(final String[] arguments) {
-        return Arrays.stream(arguments).anyMatch(ONE_SHOT_ARGUMENTS::contains);
     }
 
     private static Path stagingRoot() {

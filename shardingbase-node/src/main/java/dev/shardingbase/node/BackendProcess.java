@@ -5,6 +5,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -13,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.jar.JarFile;
 
 /**
  * Stateful supervisor for the extracted backend JVM.
@@ -24,6 +26,11 @@ import java.util.concurrent.TimeUnit;
 final class BackendProcess implements AutoCloseable {
     static final String BACKEND_MEMORY_ENVIRONMENT = "SHARDINGBASE_BACKEND_MEMORY_MB";
     static final Duration SHUTDOWN_TIMEOUT = Duration.ofSeconds(60);
+    static final Duration NODE_SHUTDOWN_TIMEOUT = Duration.ofSeconds(30);
+    static final Duration TERMINATION_TIMEOUT = Duration.ofSeconds(5);
+    static final String FAWE_ADAPTER_PROPERTY = "worldedit.bukkit.adapter";
+    static final String PAPER_26_2_FAWE_ADAPTER =
+        "com.sk89q.worldedit.bukkit.adapter.impl.fawe.v26_2.PaperweightFaweAdapter";
     private static final int MINIMUM_BACKEND_MEMORY_MIB = 512;
 
     private final Path backendJar;
@@ -40,10 +47,12 @@ final class BackendProcess implements AutoCloseable {
     private Process process;
     private Integer lastExitCode;
     private boolean gracefulStopRequested;
+    private boolean transactionStopRequested;
     private boolean closed;
 
-    private BackendProcess(
+    BackendProcess(
         final Path backendJar,
+        final Path workingDirectory,
         final String[] serverArguments,
         final Map<String, String> childEnvironment,
         final List<String> inheritedJvmArguments,
@@ -52,13 +61,17 @@ final class BackendProcess implements AutoCloseable {
         final ProcessLauncher launcher
     ) throws IOException {
         this.backendJar = backendJar.toAbsolutePath().normalize();
-        this.workingDirectory = this.backendJar.getParent();
-        if (this.workingDirectory == null) {
-            throw new IOException("Backend JAR has no working directory: " + this.backendJar);
+        this.workingDirectory = workingDirectory.toAbsolutePath().normalize();
+        if (!Files.isDirectory(this.workingDirectory)) {
+            throw new IOException("Backend working directory does not exist: " + this.workingDirectory);
         }
         this.serverArguments = serverArguments.clone();
         this.childEnvironment = Map.copyOf(childEnvironment);
-        this.jvmArguments = backendJvmArguments(inheritedJvmArguments, environment);
+        this.jvmArguments = backendJvmArguments(
+            inheritedJvmArguments,
+            environment,
+            hasFastAsyncWorldEdit(this.workingDirectory.resolve("plugins"))
+        );
         this.consoleInput = Objects.requireNonNull(consoleInput, "consoleInput");
         this.launcher = Objects.requireNonNull(launcher, "launcher");
         this.consoleRelay = Thread.ofPlatform()
@@ -72,11 +85,13 @@ final class BackendProcess implements AutoCloseable {
 
     static BackendProcess launch(
         final Path backendJar,
+        final Path workingDirectory,
         final String[] serverArguments,
         final Map<String, String> childEnvironment
     ) throws IOException {
         final BackendProcess supervisor = new BackendProcess(
             backendJar,
+            workingDirectory,
             serverArguments,
             childEnvironment,
             ManagementFactory.getRuntimeMXBean().getInputArguments(),
@@ -108,23 +123,56 @@ final class BackendProcess implements AutoCloseable {
         this.process = this.launcher.start(builder);
         this.lastExitCode = null;
         this.gracefulStopRequested = false;
+        this.transactionStopRequested = false;
+        this.notifyAll();
     }
 
     int waitForExit() throws InterruptedException {
-        final Process child;
-        synchronized (this) {
-            child = this.process;
-            if (child == null) {
-                throw new IllegalStateException("Shardingbase backend has not been started");
+        while (true) {
+            final Process child;
+            synchronized (this) {
+                child = this.process;
+                if (child == null) {
+                    throw new IllegalStateException("Shardingbase backend has not been started");
+                }
+            }
+            final int exitCode = child.waitFor();
+            synchronized (this) {
+                this.recordExit(child, exitCode);
+                if (!this.transactionStopRequested || this.closed) {
+                    return exitCode;
+                }
+                while (!this.closed && this.process == child) {
+                    this.wait();
+                }
+                if (this.closed) {
+                    return exitCode;
+                }
             }
         }
-        final int exitCode = child.waitFor();
-        this.recordExit(child, exitCode);
-        return exitCode;
     }
 
     boolean stopGracefully() throws IOException, InterruptedException {
         return this.stopGracefully(SHUTDOWN_TIMEOUT);
+    }
+
+    boolean stopForTransaction() throws IOException, InterruptedException {
+        synchronized (this) {
+            this.requireOpen();
+            this.transactionStopRequested = true;
+        }
+        boolean stopped = false;
+        try {
+            stopped = this.stopGracefully(SHUTDOWN_TIMEOUT);
+            return stopped;
+        } finally {
+            if (!stopped) {
+                synchronized (this) {
+                    this.transactionStopRequested = false;
+                    this.notifyAll();
+                }
+            }
+        }
     }
 
     boolean stopGracefully(final Duration timeout) throws IOException, InterruptedException {
@@ -207,14 +255,42 @@ final class BackendProcess implements AutoCloseable {
     }
 
     private void stopForNodeShutdown() {
+        boolean stopped = false;
         try {
-            if (!this.stopGracefully()) {
-                System.err.println("Backend did not stop within 60 seconds; refusing to force-kill it.");
-            }
-        } catch (final InterruptedException _) {
+            stopped = this.stopGracefully(NODE_SHUTDOWN_TIMEOUT);
+        } catch (InterruptedException _) {
             Thread.currentThread().interrupt();
         } catch (final IOException exception) {
             System.err.println("Unable to send the graceful backend stop command: " + exception.getMessage());
+        }
+        if (!stopped) {
+            this.terminateBackend("Backend did not stop within 30 seconds during node shutdown");
+        }
+    }
+
+    private void terminateBackend(final String reason) {
+        final Process child;
+        synchronized (this) {
+            child = this.process;
+        }
+        if (child == null || !child.isAlive()) {
+            return;
+        }
+        System.err.println(reason + "; terminating the backend process.");
+        child.destroy();
+        try {
+            if (!child.waitFor(TERMINATION_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
+                System.err.println("Backend ignored termination; forcing the process to exit.");
+                child.destroyForcibly();
+                child.waitFor(TERMINATION_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            }
+        } catch (InterruptedException _) {
+            Thread.currentThread().interrupt();
+            child.destroyForcibly();
+        } finally {
+            if (!child.isAlive()) {
+                this.recordExit(child, child.exitValue());
+            }
         }
     }
 
@@ -244,30 +320,66 @@ final class BackendProcess implements AutoCloseable {
         final List<String> inheritedArguments,
         final Map<String, String> environment
     ) throws IOException {
+        return backendJvmArguments(inheritedArguments, environment, false);
+    }
+
+    static List<String> backendJvmArguments(
+        final List<String> inheritedArguments,
+        final Map<String, String> environment,
+        final boolean fastAsyncWorldEditInstalled
+    ) throws IOException {
         final String configuredMemory = environment.get(BACKEND_MEMORY_ENVIRONMENT);
+        final List<String> childArguments = new ArrayList<>(inheritedArguments.size() + 3);
         if (configuredMemory == null || configuredMemory.isBlank()) {
-            return List.copyOf(inheritedArguments);
+            childArguments.addAll(inheritedArguments);
+        } else {
+            final int memoryMib;
+            try {
+                memoryMib = Integer.parseInt(configuredMemory.trim());
+            } catch (NumberFormatException exception) {
+                throw new IOException(BACKEND_MEMORY_ENVIRONMENT + " must be an integer number of MiB", exception);
+            }
+            if (memoryMib < MINIMUM_BACKEND_MEMORY_MIB) {
+                throw new IOException(BACKEND_MEMORY_ENVIRONMENT + " must be at least " + MINIMUM_BACKEND_MEMORY_MIB);
+            }
+            for (final String argument : inheritedArguments) {
+                if (!isHeapSizingArgument(argument)) {
+                    childArguments.add(argument);
+                }
+            }
+            childArguments.add("-Xms128M");
+            childArguments.add("-Xmx" + memoryMib + "M");
         }
+        if (fastAsyncWorldEditInstalled
+            && childArguments.stream().noneMatch(BackendProcess::isFaweAdapterArgument)) {
+            childArguments.add("-D" + FAWE_ADAPTER_PROPERTY + '=' + PAPER_26_2_FAWE_ADAPTER);
+        }
+        return List.copyOf(childArguments);
+    }
 
-        final int memoryMib;
-        try {
-            memoryMib = Integer.parseInt(configuredMemory.trim());
-        } catch (NumberFormatException exception) {
-            throw new IOException(BACKEND_MEMORY_ENVIRONMENT + " must be an integer number of MiB", exception);
+    static boolean hasFastAsyncWorldEdit(final Path pluginsDirectory) throws IOException {
+        if (!Files.isDirectory(pluginsDirectory)) {
+            return false;
         }
-        if (memoryMib < MINIMUM_BACKEND_MEMORY_MIB) {
-            throw new IOException(BACKEND_MEMORY_ENVIRONMENT + " must be at least " + MINIMUM_BACKEND_MEMORY_MIB);
-        }
-
-        final List<String> childArguments = new ArrayList<>(inheritedArguments.size() + 2);
-        for (final String argument : inheritedArguments) {
-            if (!isHeapSizingArgument(argument)) {
-                childArguments.add(argument);
+        try (var entries = Files.list(pluginsDirectory)) {
+            for (final Path entry : entries.filter(Files::isRegularFile).toList()) {
+                if (!entry.getFileName().toString().toLowerCase(java.util.Locale.ROOT).endsWith(".jar")) {
+                    continue;
+                }
+                try (JarFile plugin = new JarFile(entry.toFile())) {
+                    if (plugin.getJarEntry("com/fastasyncworldedit/core/Fawe.class") != null) {
+                        return true;
+                    }
+                } catch (IOException _) {
+                    // Paper owns plugin validation and will report an invalid JAR with its normal diagnostics.
+                }
             }
         }
-        childArguments.add("-Xms128M");
-        childArguments.add("-Xmx" + memoryMib + "M");
-        return List.copyOf(childArguments);
+        return false;
+    }
+
+    private static boolean isFaweAdapterArgument(final String argument) {
+        return argument.startsWith("-D" + FAWE_ADAPTER_PROPERTY + '=');
     }
 
     private static boolean isHeapSizingArgument(final String argument) {
@@ -305,20 +417,23 @@ final class BackendProcess implements AutoCloseable {
                 return;
             }
             this.closed = true;
+            this.notifyAll();
         }
         try {
             if (!this.stopGracefully()) {
-                System.err.println("Backend did not stop within 60 seconds; refusing to force-kill it.");
+                this.terminateBackend("Backend did not stop within 60 seconds while closing the supervisor");
             }
-        } catch (final InterruptedException _) {
+        } catch (InterruptedException _) {
             Thread.currentThread().interrupt();
+            this.terminateBackend("Interrupted while waiting for the backend to stop");
         } catch (final IOException exception) {
             System.err.println("Unable to stop the Shardingbase backend: " + exception.getMessage());
+            this.terminateBackend("Graceful backend shutdown failed");
         }
         this.consoleRelay.interrupt();
         try {
             Runtime.getRuntime().removeShutdownHook(this.shutdownHook);
-        } catch (final IllegalStateException _) {
+        } catch (IllegalStateException _) {
             // The JVM is already shutting down and the hook owns child cleanup.
         }
     }
@@ -327,7 +442,7 @@ final class BackendProcess implements AutoCloseable {
     }
 
     @FunctionalInterface
-    private interface ProcessLauncher {
+    interface ProcessLauncher {
         Process start(ProcessBuilder builder) throws IOException;
     }
 }

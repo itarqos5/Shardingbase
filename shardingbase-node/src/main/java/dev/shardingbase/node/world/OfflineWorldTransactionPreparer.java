@@ -42,6 +42,8 @@ public final class OfflineWorldTransactionPreparer {
                 plan.axis(),
                 plan.cutChunk()
             );
+            TransferTreeManifest.write(negative);
+            TransferTreeManifest.write(positive);
             journal.advance(TransactionPhase.SPLIT_COMPLETE);
             return new PreparedTransaction(journalPath, backup, negative, positive, summary);
         } catch (final IOException | RuntimeException exception) {
@@ -52,9 +54,7 @@ public final class OfflineWorldTransactionPreparer {
 
     private static void markFailure(final WorldTransactionJournal journal) {
         try {
-            if (journal.phase() == TransactionPhase.BACKUP_COMPLETE || journal.phase() == TransactionPhase.SPLIT_COMPLETE) {
-                journal.advance(TransactionPhase.ROLLED_BACK);
-            } else if (journal.phase() != TransactionPhase.ROLLED_BACK) {
+            if (journal.phase() != TransactionPhase.ROLLED_BACK && journal.phase() != TransactionPhase.FAILED) {
                 journal.advance(TransactionPhase.FAILED);
             }
         } catch (final IOException exception) {

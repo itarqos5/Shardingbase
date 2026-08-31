@@ -17,12 +17,12 @@ application {
 tasks.jar {
     dependsOn(project(":shardingbase-common").tasks.jar)
     dependsOn(":paper-server:createShardingbaseJar")
-    archiveFileName = "Shardingbase-Node.jar"
+    archiveFileName = "server.jar"
     manifest.attributes["Main-Class"] = application.mainClass.get()
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     from(rootProject.layout.projectDirectory.file("paper-server/build/libs/Shardingbase.jar")) {
         into("META-INF/shardingbase")
-        rename { "Shardingbase-server.jar" }
+        rename { "backend.jar" }
     }
     from({
         configurations.runtimeClasspath.get().map { dependency ->
