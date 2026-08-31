@@ -30,7 +30,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Color;
 import org.bukkit.Location;
 import org.bukkit.Particle;
-import org.bukkit.WorldBorder;
+import org.bukkit.World;
 import org.bukkit.entity.Player;
 
 /** Enforces visible shard boundaries and initiates safe managed player handoffs. */
@@ -38,10 +38,11 @@ final class ShardBoundaryCoordinator implements AutoCloseable {
     private static final long TICK_MILLIS = 50;
     private static final long PARTICLE_INTERVAL_TICKS = 10;
     private static final double PARTICLE_DISTANCE = 48.0;
+    private static final double APPROACH_DISTANCE = 0.75;
+    private static final double MAX_WALK_STEP = 1.5;
+    private static final double CROSSING_INSET = 0.5;
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
     private static final Duration RETRY_DELAY = Duration.ofSeconds(3);
-    private static final double WORLD_BORDER_LIMIT = 29_999_984.0;
-    private static final double WORLD_BORDER_MAX_SIZE = WORLD_BORDER_LIMIT * 2.0;
     private static final Particle.DustOptions WALL_DUST = new Particle.DustOptions(Color.RED, 1.0F);
 
     private final Supplier<ShardManifestRegistry> manifests;
@@ -59,7 +60,6 @@ final class ShardBoundaryCoordinator implements AutoCloseable {
     private final Map<UUID, Location> lastLocal = new HashMap<>();
     private final Map<UUID, PendingCrossing> pending = new HashMap<>();
     private final Map<UUID, Long> retryAfterNanos = new HashMap<>();
-    private final Map<UUID, BorderState> borders = new HashMap<>();
     private final Map<UUID, UUID> notices = new HashMap<>();
     private final Set<String> reportedIntegrityFailures = new HashSet<>();
     private volatile Executor serverExecutor;
@@ -111,8 +111,50 @@ final class ShardBoundaryCoordinator implements AutoCloseable {
         this.pending.remove(playerId);
         this.lastLocal.remove(playerId);
         this.retryAfterNanos.remove(playerId);
-        this.borders.remove(playerId);
         this.notices.remove(playerId);
+    }
+
+    ShardingbaseRuntime.PlayerTeleportRouting routeTeleport(final Player player, final Location target) {
+        final World world = target.getWorld();
+        if (world == null) {
+            return ShardingbaseRuntime.PlayerTeleportRouting.REJECTED;
+        }
+        final String worldKey = world.getKey().toString();
+        final ShardManifestRegistry.Boundary boundary = this.manifests.get().boundary(worldKey).orElse(null);
+        if (boundary == null || boundary.owns(target.getBlockX(), target.getBlockZ())) {
+            return ShardingbaseRuntime.PlayerTeleportRouting.LOCAL;
+        }
+        if (!boundary.worldId().equals(world.getUID())) {
+            final String detail = "world identity mismatch for " + worldKey + ": manifest "
+                + boundary.worldId() + ", loaded " + world.getUID();
+            if (this.reportedIntegrityFailures.add(detail)) {
+                this.logger.severe("Shardingbase ownership lock: " + detail);
+                this.integrityFailure.accept(detail);
+            }
+            player.sendMessage(Component.text("Shardingbase rejected the teleport: " + detail));
+            return ShardingbaseRuntime.PlayerTeleportRouting.REJECTED;
+        }
+
+        final PeerStatus peer = this.peerStatus.get();
+        if (this.featureState.get() != FeatureState.ENABLED || !peer.available()
+            || !boundary.peerId().equals(peer.serverId())) {
+            player.sendMessage(Component.text("Shardingbase cannot reach the shard that owns that destination."));
+            return ShardingbaseRuntime.PlayerTeleportRouting.REJECTED;
+        }
+
+        final PlayerHandoffCodec.TransferDestination destination = new PlayerHandoffCodec.TransferDestination(
+            worldKey,
+            world.getUID(),
+            target.getX(),
+            target.getY(),
+            target.getZ(),
+            target.getYaw(),
+            target.getPitch()
+        );
+        final boolean accepted = this.beginTransfer(player, peer.serverId(), destination, player.getLocation());
+        return accepted
+            ? ShardingbaseRuntime.PlayerTeleportRouting.ACCEPTED
+            : ShardingbaseRuntime.PlayerTeleportRouting.REJECTED;
     }
 
     private void queueTick() {
@@ -148,7 +190,6 @@ final class ShardBoundaryCoordinator implements AutoCloseable {
         this.lastLocal.keySet().removeIf(playerId -> !online.contains(playerId));
         this.pending.keySet().removeIf(playerId -> !online.contains(playerId));
         this.retryAfterNanos.keySet().removeIf(playerId -> !online.contains(playerId));
-        this.borders.keySet().removeIf(playerId -> !online.contains(playerId));
         this.notices.keySet().removeIf(playerId -> !online.contains(playerId));
     }
 
@@ -156,7 +197,6 @@ final class ShardBoundaryCoordinator implements AutoCloseable {
         final String worldKey = player.getWorld().getKey().toString();
         final ShardManifestRegistry.Boundary boundary = this.manifests.get().boundary(worldKey).orElse(null);
         if (boundary == null) {
-            this.clearBorder(player);
             this.lastLocal.remove(player.getUniqueId());
             this.pending.remove(player.getUniqueId());
             return;
@@ -172,7 +212,6 @@ final class ShardBoundaryCoordinator implements AutoCloseable {
             return;
         }
 
-        this.installBorder(player, boundary);
         this.sendOperatorNotice(player, boundary);
         if (this.ticks % PARTICLE_INTERVAL_TICKS == 0) {
             this.showWall(player, boundary);
@@ -190,7 +229,11 @@ final class ShardBoundaryCoordinator implements AutoCloseable {
             return;
         }
         if (boundary.owns(current.getBlockX(), current.getBlockZ())) {
+            final Location previous = this.lastLocal.get(playerId);
             this.lastLocal.put(playerId, current.clone());
+            if (approachingBoundary(boundary, current, previous)) {
+                this.beginApproachTransfer(player, boundary, current);
+            }
             return;
         }
 
@@ -215,14 +258,88 @@ final class ShardBoundaryCoordinator implements AutoCloseable {
             current.getYaw(),
             current.getPitch()
         );
-        final PendingCrossing crossing = new PendingCrossing(safeLocal.clone(), now);
-        this.pending.put(playerId, crossing);
+        this.beginTransfer(player, peer.serverId(), destination, safeLocal);
+    }
+
+    private void beginApproachTransfer(
+        final Player player,
+        final ShardManifestRegistry.Boundary boundary,
+        final Location current
+    ) {
+        final PeerStatus peer = this.peerStatus.get();
+        if (this.featureState.get() != FeatureState.ENABLED || !peer.available()
+            || !boundary.peerId().equals(peer.serverId())) {
+            return;
+        }
+        final UUID playerId = player.getUniqueId();
+        final long now = System.nanoTime();
+        if (now < this.retryAfterNanos.getOrDefault(playerId, 0L)) {
+            return;
+        }
+        final Location target = current.clone();
+        final double remoteCoordinate = boundary.ownedSide() == ShardManifestRegistry.Side.NEGATIVE
+            ? boundary.cutBlock() + CROSSING_INSET
+            : boundary.cutBlock() - CROSSING_INSET;
+        if (boundary.axis() == ShardManifestRegistry.Axis.X) {
+            target.setX(remoteCoordinate);
+        } else {
+            target.setZ(remoteCoordinate);
+        }
+        this.beginTransfer(player, peer.serverId(), new PlayerHandoffCodec.TransferDestination(
+            target.getWorld().getKey().toString(),
+            target.getWorld().getUID(),
+            target.getX(),
+            target.getY(),
+            target.getZ(),
+            target.getYaw(),
+            target.getPitch()
+        ), current);
+    }
+
+    static boolean approachingBoundary(
+        final ShardManifestRegistry.Boundary boundary,
+        final Location current,
+        final Location previous
+    ) {
+        if (previous == null || previous.getWorld() != current.getWorld()) {
+            return false;
+        }
+        final double currentAxis = boundary.axis() == ShardManifestRegistry.Axis.X
+            ? current.getX()
+            : current.getZ();
+        final double previousAxis = boundary.axis() == ShardManifestRegistry.Axis.X
+            ? previous.getX()
+            : previous.getZ();
+        final double step = currentAxis - previousAxis;
+        final boolean towardPeer = boundary.ownedSide() == ShardManifestRegistry.Side.NEGATIVE
+            ? step > 0.0
+            : step < 0.0;
+        return towardPeer
+            && Math.abs(step) <= MAX_WALK_STEP
+            && Math.abs(currentAxis - boundary.cutBlock()) <= APPROACH_DISTANCE
+            && Math.abs(previousAxis - boundary.cutBlock()) <= APPROACH_DISTANCE + MAX_WALK_STEP;
+    }
+
+    private boolean beginTransfer(
+        final Player player,
+        final String peerId,
+        final PlayerHandoffCodec.TransferDestination destination,
+        final Location safeLocal
+    ) {
+        final UUID playerId = player.getUniqueId();
+        final PendingCrossing crossing = new PendingCrossing(safeLocal.clone(), System.nanoTime());
+        if (this.pending.putIfAbsent(playerId, crossing) != null) {
+            player.sendActionBar(Component.text("A Shardingbase transfer is already pending."));
+            return false;
+        }
         player.sendActionBar(Component.text("Transferring to the peer shard…"));
         try {
-            this.transport.execute(() -> this.requestTransfer(playerId, peer.serverId(), destination, crossing));
+            this.transport.execute(() -> this.requestTransfer(playerId, peerId, destination, crossing));
+            return true;
         } catch (final RejectedExecutionException exception) {
             this.pending.remove(playerId, crossing);
             this.deferRetry(player, "Boundary transfer queue is busy; you remain on this shard.");
+            return false;
         }
     }
 
@@ -300,38 +417,6 @@ final class ShardBoundaryCoordinator implements AutoCloseable {
         }
     }
 
-    private void installBorder(final Player player, final ShardManifestRegistry.Boundary boundary) {
-        final BorderState existing = this.borders.get(player.getUniqueId());
-        if (existing != null && existing.transactionId().equals(boundary.transactionId())
-            && player.getWorldBorder() == existing.border()) {
-            return;
-        }
-        final double available = boundary.ownedSide() == ShardManifestRegistry.Side.NEGATIVE
-            ? boundary.cutBlock() + WORLD_BORDER_LIMIT
-            : WORLD_BORDER_LIMIT - boundary.cutBlock();
-        final double size = Math.max(1.0, Math.min(WORLD_BORDER_MAX_SIZE, available * 2.0));
-        final double axisCenter = boundary.ownedSide() == ShardManifestRegistry.Side.NEGATIVE
-            ? boundary.cutBlock() - size / 2.0
-            : boundary.cutBlock() + size / 2.0;
-        final WorldBorder border = Bukkit.createWorldBorder();
-        border.setSize(size);
-        border.setCenter(
-            boundary.axis() == ShardManifestRegistry.Axis.X ? axisCenter : 0.0,
-            boundary.axis() == ShardManifestRegistry.Axis.Z ? axisCenter : 0.0
-        );
-        border.setDamageAmount(0.0);
-        border.setWarningDistance(16);
-        player.setWorldBorder(border);
-        this.borders.put(player.getUniqueId(), new BorderState(boundary.transactionId(), border));
-    }
-
-    private void clearBorder(final Player player) {
-        final BorderState existing = this.borders.remove(player.getUniqueId());
-        if (existing != null && player.getWorldBorder() == existing.border()) {
-            player.setWorldBorder(null);
-        }
-    }
-
     private void sendOperatorNotice(final Player player, final ShardManifestRegistry.Boundary boundary) {
         if (!player.isOp() || boundary.transactionId().equals(this.notices.get(player.getUniqueId()))) {
             return;
@@ -376,8 +461,5 @@ final class ShardBoundaryCoordinator implements AutoCloseable {
     }
 
     private record PendingCrossing(Location safeLocal, long startedNanos) {
-    }
-
-    private record BorderState(UUID transactionId, WorldBorder border) {
     }
 }

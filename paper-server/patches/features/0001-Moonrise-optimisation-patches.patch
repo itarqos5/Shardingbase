@@ -28191,7 +28191,7 @@ index 473feb1aa6ccf0f03ce0bc895de367b3e554e1bc..4fce291cb7cd6eb2f4e47237fe247a5d
              "Server weather",
              () -> String.format(
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index b569df775fcc9885b7cfee1b8280b68f33f4cd71..220409fd6335e17445e1acdbfac8d83ae36a99b4 100644
+index bc27102de4d06016c3ed6c86547db75b580b7447..8bc13e6ff395dff77f0fa597a01ddb21d63d04a0 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
 @@ -206,7 +206,7 @@ import net.minecraft.world.scores.criteria.ObjectiveCriteria;
@@ -28866,10 +28866,10 @@ index a46b89895a9ce86b6f5fabd373a4e91919d88033..22b10500ef74694243a4fec40822bb54
          // Paper start - PlayerChunkLoadEvent
          if (io.papermc.paper.event.packet.PlayerChunkLoadEvent.getHandlerList().getRegisteredListeners().length > 0) {
 diff --git a/net/minecraft/server/network/config/PrepareSpawnTask.java b/net/minecraft/server/network/config/PrepareSpawnTask.java
-index 5d7a432fa4cae0fb8df4578e32459f22a9af7f4c..ba8b4d59235a924af59183a0631067a7d3ace38e 100644
+index dbc02f15cb6649fb5a850817c04d79faffbc2863..ae22eae93c0b28281a0d576d81fe8e1e928117d5 100644
 --- a/net/minecraft/server/network/config/PrepareSpawnTask.java
 +++ b/net/minecraft/server/network/config/PrepareSpawnTask.java
-@@ -175,7 +175,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
+@@ -210,7 +210,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
          private Vec2 spawnAngle; // Paper - remove final
          private @Nullable CompletableFuture<?> chunkLoadFuture;
          private @Nullable CompletableFuture<org.bukkit.Location> eventFuture; // Paper
@@ -28878,9 +28878,9 @@ index 5d7a432fa4cae0fb8df4578e32459f22a9af7f4c..ba8b4d59235a924af59183a0631067a7
  
          private Preparing(final ServerLevel spawnLevel, final CompletableFuture<Vec3> spawnPosition, final Vec2 spawnAngle) {
              this.spawnLevel = spawnLevel;
-@@ -243,11 +243,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
+@@ -289,11 +289,7 @@ public class PrepareSpawnTask implements ConfigurationTask {
+                     return null;
                  }
-                 // Paper end - PlayerSpawnLocationEvent
                  ChunkPos spawnChunk = ChunkPos.containing(BlockPos.containing(spawnPosition));
 -                this.chunkLoadCounter
 -                    .track(

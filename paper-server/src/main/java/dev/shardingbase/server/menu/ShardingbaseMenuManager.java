@@ -177,9 +177,13 @@ public final class ShardingbaseMenuManager {
         }
         if (DefaultMenus.CONFIRMATION.equals(menuId) && "confirm".equals(buttonId)) {
             player.closeInventory();
-            player.sendMessage(Component.text(this.runtime.featureState() == FeatureState.ENABLED
-                ? "Player synchronization request submitted."
-                : "Player synchronization is unavailable: " + this.runtime.statusDetail()));
+            try {
+                final int queued = this.runtime.synchronizeOnlinePlayers();
+                player.sendMessage(Component.text("Queued portable state for " + queued
+                    + " online player(s). Offline player files are not changed by this prototype."));
+            } catch (final IllegalStateException exception) {
+                player.sendMessage(Component.text(exception.getMessage()));
+            }
             return;
         }
         if (DefaultMenus.WORLD_SHARDING.equals(menuId) && "open-planner".equals(buttonId)) {

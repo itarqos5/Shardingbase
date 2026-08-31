@@ -6,6 +6,7 @@ import dev.shardingbase.server.config.ShardingbaseConfigurationException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
@@ -14,7 +15,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
-/** Strict ownership manifests discovered in direct world directories. */
+/** Strict ownership manifests discovered in Paper world and dimension directories. */
 final class ShardManifestRegistry {
     static final String FILE_NAME = "shardingbase-shard.properties";
     private static final Set<String> FIELDS = Set.of(
@@ -40,22 +41,45 @@ final class ShardManifestRegistry {
 
     static ShardManifestRegistry load(final Path serverDirectory) throws ShardingbaseConfigurationException {
         final Map<String, Manifest> manifests = new HashMap<>();
-        try (var children = Files.list(serverDirectory.toAbsolutePath().normalize())) {
-            for (final Path child : children.filter(Files::isDirectory).toList()) {
-                final Path path = child.resolve(FILE_NAME);
-                if (Files.notExists(path)) {
+        final Path root = serverDirectory.toAbsolutePath().normalize();
+        try (var children = Files.list(root)) {
+            for (final Path child : children
+                .filter(path -> Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
+                .toList()) {
+                final Path direct = child.resolve(FILE_NAME);
+                if (Files.exists(direct, LinkOption.NOFOLLOW_LINKS)) {
+                    addManifest(manifests, direct);
+                }
+                final Path dimensions = child.resolve("dimensions");
+                if (!Files.isDirectory(dimensions, LinkOption.NOFOLLOW_LINKS)) {
                     continue;
                 }
-                final Manifest manifest = read(path);
-                if (manifests.put(manifest.worldKey(), manifest) != null) {
-                    throw new ShardingbaseConfigurationException(
-                        "Duplicate Shardingbase shard manifest for world " + manifest.worldKey()
-                    );
+                try (var nested = Files.find(
+                    dimensions,
+                    16,
+                    (path, attributes) -> FILE_NAME.equals(path.getFileName().toString())
+                )) {
+                    for (final Path path : nested.toList()) {
+                        addManifest(manifests, path);
+                    }
                 }
             }
             return new ShardManifestRegistry(manifests);
         } catch (final IOException exception) {
             throw new ShardingbaseConfigurationException("Unable to discover Shardingbase shard manifests", exception);
+        }
+    }
+
+    private static void addManifest(final Map<String, Manifest> manifests, final Path path)
+        throws ShardingbaseConfigurationException {
+        if (Files.isSymbolicLink(path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            throw new ShardingbaseConfigurationException("Shard manifest must be a regular non-symbolic file: " + path);
+        }
+        final Manifest manifest = read(path);
+        if (manifests.put(manifest.worldKey(), manifest) != null) {
+            throw new ShardingbaseConfigurationException(
+                "Duplicate Shardingbase shard manifest for world " + manifest.worldKey()
+            );
         }
     }
 

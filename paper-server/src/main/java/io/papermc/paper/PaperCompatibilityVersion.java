@@ -3,6 +3,7 @@ package io.papermc.paper;
 import com.google.common.base.Strings;
 import io.papermc.paper.util.JarManifests;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.jar.Manifest;
 import java.util.regex.Pattern;
 import org.bukkit.craftbukkit.CraftServer;
@@ -42,6 +43,16 @@ public final class PaperCompatibilityVersion {
         );
     }
 
+    /**
+     * Returns the exact upstream Paper build number recorded in this fork's
+     * manifest, when available.
+     *
+     * @return the upstream Paper build number
+     */
+    public static @NotNull OptionalInt buildNumber() {
+        return buildNumberFromManifest(JarManifests.manifest(CraftServer.class));
+    }
+
     static @NotNull String fromManifest(
         final Manifest manifest,
         final String minecraftVersion,
@@ -53,6 +64,11 @@ public final class PaperCompatibilityVersion {
             return fallback;
         }
         return minecraftVersion + '-' + build.get() + '-' + commit.get().substring(0, 7);
+    }
+
+    static @NotNull OptionalInt buildNumberFromManifest(final Manifest manifest) {
+        final Optional<String> build = attribute(manifest, ATTRIBUTE_BUILD).filter(BUILD.asMatchPredicate());
+        return build.isPresent() ? OptionalInt.of(Integer.parseInt(build.get())) : OptionalInt.empty();
     }
 
     private static Optional<String> attribute(final Manifest manifest, final String name) {

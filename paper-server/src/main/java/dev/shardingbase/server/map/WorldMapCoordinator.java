@@ -9,6 +9,7 @@ import dev.shardingbase.world.GeneratedChunkIndex;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -29,6 +30,7 @@ import org.bukkit.World;
 /** Incrementally renders generated terrain into bounded top-down PNG tiles without generating chunks. */
 public final class WorldMapCoordinator implements AutoCloseable {
     private final String backendId;
+    private final Path serverDirectory;
     private final Logger logger;
     private final LocalNodeClient node = new LocalNodeClient();
     private final ExecutorService io = Executors.newFixedThreadPool(2, task -> Thread.ofPlatform()
@@ -38,8 +40,9 @@ public final class WorldMapCoordinator implements AutoCloseable {
     private final AtomicBoolean closed = new AtomicBoolean();
     private volatile Executor serverExecutor;
 
-    public WorldMapCoordinator(final String backendId, final Logger logger) {
+    public WorldMapCoordinator(final String backendId, final Path serverDirectory, final Logger logger) {
         this.backendId = backendId;
+        this.serverDirectory = serverDirectory.toAbsolutePath().normalize();
         this.logger = logger;
     }
 
@@ -53,7 +56,7 @@ public final class WorldMapCoordinator implements AutoCloseable {
         }
         return CompletableFuture.supplyAsync(() -> {
             try {
-                return GeneratedChunkIndex.scan(world.getWorldFolder().toPath().resolve("region"));
+                return GeneratedChunkIndex.scan(world.getWorldPath().resolve("region"));
             } catch (final IOException exception) {
                 throw new CompletionException(exception);
             }
@@ -73,7 +76,7 @@ public final class WorldMapCoordinator implements AutoCloseable {
                         sessionId,
                         this.backendId,
                         world.getKey().toString(),
-                        world.getWorldFolder().getName(),
+                        this.relativeWorldPath(world),
                         world.getUID(),
                         world.getSeed(),
                         org.bukkit.Bukkit.getUnsafe().getDataVersion(),
@@ -98,6 +101,18 @@ public final class WorldMapCoordinator implements AutoCloseable {
             }
         }, this.io).thenCompose(tiles -> this.renderTiles(world, sessionId, new ArrayList<>(tiles.entrySet()), 0))
             .thenCompose(ignored -> CompletableFuture.supplyAsync(() -> this.complete(sessionId), this.io));
+    }
+
+    private String relativeWorldPath(final World world) throws IOException {
+        final Path worldPath = world.getWorldPath().toAbsolutePath().normalize();
+        if (!worldPath.startsWith(this.serverDirectory)) {
+            throw new IOException("Loaded world path escapes the Shardingbase server directory: " + worldPath);
+        }
+        final Path relative = this.serverDirectory.relativize(worldPath);
+        if (relative.getNameCount() == 0) {
+            throw new IOException("Loaded world path cannot be the Shardingbase server directory");
+        }
+        return relative.toString().replace('\\', '/');
     }
 
     private CompletableFuture<Void> renderTiles(

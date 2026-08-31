@@ -93,6 +93,9 @@ public class CraftLimitedRegion extends CraftRegionAccessor implements LimitedRe
         // load entities which are already present
         for (int x = -(this.buffer >> 4); x <= (this.buffer >> 4); x++) {
             for (int z = -(this.buffer >> 4); z <= (this.buffer >> 4); z++) {
+                if (!this.shardingbaseOwnsChunk(this.centerChunkX + x, this.centerChunkZ + z)) {
+                    continue;
+                }
                 ProtoChunk chunk = (ProtoChunk) access.getChunk(this.centerChunkX + x, this.centerChunkZ + z);
                 for (CompoundTag compound : chunk.getEntities()) {
                     EntityType.loadEntityRecursive(compound, access.getMinecraftWorld(), new EntitySpawnRequest(EntitySpawnReason.LOAD, false), (entity) -> {
@@ -117,6 +120,9 @@ public class CraftLimitedRegion extends CraftRegionAccessor implements LimitedRe
         if (this.entitiesLoaded) {
             for (int x = -(this.buffer >> 4); x <= (this.buffer >> 4); x++) {
                 for (int z = -(this.buffer >> 4); z <= (this.buffer >> 4); z++) {
+                    if (!this.shardingbaseOwnsChunk(this.centerChunkX + x, this.centerChunkZ + z)) {
+                        continue;
+                    }
                     ProtoChunk chunk = (ProtoChunk) access.getChunk(this.centerChunkX + x, this.centerChunkZ + z);
                     chunk.getEntities().clear();
                 }
@@ -124,7 +130,7 @@ public class CraftLimitedRegion extends CraftRegionAccessor implements LimitedRe
         }
 
         for (net.minecraft.world.entity.Entity entity : this.entities) {
-            if (entity.isAlive()) {
+            if (entity.isAlive() && this.shardingbaseOwnsBlock(entity.getBlockX(), entity.getBlockZ())) {
                 // check if entity is still in region or if it got teleported outside it
                 Preconditions.checkState(this.region.contains(entity.getX(), entity.getY(), entity.getZ()), "Entity %s is not in the region", entity);
                 access.addFreshEntityWithPassengers(entity);
@@ -132,7 +138,9 @@ public class CraftLimitedRegion extends CraftRegionAccessor implements LimitedRe
         }
 
         for (net.minecraft.world.entity.Entity entity : this.outsideEntities) {
-            access.addFreshEntityWithPassengers(entity);
+            if (this.shardingbaseOwnsBlock(entity.getBlockX(), entity.getBlockZ())) {
+                access.addFreshEntityWithPassengers(entity);
+            }
         }
     }
 
@@ -147,12 +155,24 @@ public class CraftLimitedRegion extends CraftRegionAccessor implements LimitedRe
 
     @Override
     public boolean isInRegion(Location location) {
-        return this.region.contains(location.getX(), location.getY(), location.getZ());
+        return this.region.contains(location.getX(), location.getY(), location.getZ())
+            && this.shardingbaseOwnsBlock(location.getBlockX(), location.getBlockZ());
     }
 
     @Override
     public boolean isInRegion(int x, int y, int z) {
-        return this.region.contains(x, y, z);
+        return this.region.contains(x, y, z) && this.shardingbaseOwnsBlock(x, z);
+    }
+
+    private boolean shardingbaseOwnsBlock(final int blockX, final int blockZ) {
+        return this.shardingbaseOwnsChunk(blockX >> 4, blockZ >> 4);
+    }
+
+    private boolean shardingbaseOwnsChunk(final int chunkX, final int chunkZ) {
+        final World world = this.getHandle().getMinecraftWorld().getWorld();
+        return this.getHandle().getMinecraftWorld().getCraftServer().shardingbaseRuntime().isChunkLocallyOwned(
+            world.getKey().toString(), world.getUID(), chunkX, chunkZ
+        );
     }
 
     @Override
@@ -161,6 +181,9 @@ public class CraftLimitedRegion extends CraftRegionAccessor implements LimitedRe
 
         for (int x = -(this.buffer >> 4); x <= (this.buffer >> 4); x++) {
             for (int z = -(this.buffer >> 4); z <= (this.buffer >> 4); z++) {
+                if (!this.shardingbaseOwnsChunk(this.centerChunkX + x, this.centerChunkZ + z)) {
+                    continue;
+                }
                 ProtoChunk chunk = (ProtoChunk) this.getHandle().getChunk(this.centerChunkX + x, this.centerChunkZ + z);
                 for (BlockPos position : chunk.getBlockEntitiesPos()) {
                     blockStates.add(this.getBlockState(position.getX(), position.getY(), position.getZ()));
@@ -273,11 +296,13 @@ public class CraftLimitedRegion extends CraftRegionAccessor implements LimitedRe
 
     @Override
     public void addEntityToWorld(net.minecraft.world.entity.Entity entity, CreatureSpawnEvent.SpawnReason reason) {
+        Preconditions.checkArgument(this.shardingbaseOwnsBlock(entity.getBlockX(), entity.getBlockZ()), "Entity is outside the local shard");
         this.entities.add(entity);
     }
 
     @Override
     public void addEntityWithPassengers(net.minecraft.world.entity.Entity entity, CreatureSpawnEvent.SpawnReason reason) {
+        Preconditions.checkArgument(this.shardingbaseOwnsBlock(entity.getBlockX(), entity.getBlockZ()), "Entity is outside the local shard");
         this.entities.add(entity);
     }
 

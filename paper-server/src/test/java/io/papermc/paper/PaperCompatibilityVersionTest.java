@@ -6,6 +6,7 @@ import org.bukkit.support.environment.Normal;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @Normal
 public class PaperCompatibilityVersionTest {
@@ -22,6 +23,7 @@ public class PaperCompatibilityVersionTest {
             "26.2-121-a2a42c5",
             PaperCompatibilityVersion.fromManifest(manifest, "26.2", "26.2-DEV-local")
         );
+        assertEquals(121, PaperCompatibilityVersion.buildNumberFromManifest(manifest).orElseThrow());
     }
 
     @Test
@@ -30,6 +32,7 @@ public class PaperCompatibilityVersionTest {
             "26.2-DEV-local",
             PaperCompatibilityVersion.fromManifest(null, "26.2", "26.2-DEV-local")
         );
+        assertTrue(PaperCompatibilityVersion.buildNumberFromManifest(null).isEmpty());
 
         final Manifest manifest = new Manifest();
         final Attributes attributes = manifest.getMainAttributes();
@@ -39,5 +42,6 @@ public class PaperCompatibilityVersionTest {
             "26.2-DEV-local",
             PaperCompatibilityVersion.fromManifest(manifest, "26.2", "26.2-DEV-local")
         );
+        assertTrue(PaperCompatibilityVersion.buildNumberFromManifest(manifest).isEmpty());
     }
 }

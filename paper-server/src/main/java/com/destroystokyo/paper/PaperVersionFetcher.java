@@ -7,6 +7,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonSyntaxException;
 import com.mojang.logging.LogUtils;
+import io.papermc.paper.PaperCompatibilityVersion;
 import io.papermc.paper.ServerBuildInfo;
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -54,7 +55,7 @@ public class PaperVersionFetcher implements VersionFetcher {
     @Override
     public Component getVersionMessage() {
         final Component updateMessage;
-        if (BUILD_INFO.buildNumber().isEmpty() && BUILD_INFO.gitCommit().isEmpty()) {
+        if (buildNumber().isEmpty() && BUILD_INFO.gitCommit().isEmpty()) {
             updateMessage = text("You are running a development version without access to version information", color(0xFF5300));
         } else {
             updateMessage = getUpdateStatusMessage();
@@ -67,7 +68,7 @@ public class PaperVersionFetcher implements VersionFetcher {
     public static void getUpdateStatusStartupMessage() {
         int distance = DISTANCE_ERROR;
 
-        final OptionalInt buildNumber = BUILD_INFO.buildNumber();
+        final OptionalInt buildNumber = buildNumber();
         if (buildNumber.isEmpty() && BUILD_INFO.gitCommit().isEmpty()) {
             COMPONENT_LOGGER.warn(text("*** You are running a development version without access to version information ***"));
         } else {
@@ -110,7 +111,7 @@ public class PaperVersionFetcher implements VersionFetcher {
     private static Component getUpdateStatusMessage() {
         int distance = DISTANCE_ERROR;
 
-        final OptionalInt buildNumber = PaperVersionFetcher.BUILD_INFO.buildNumber();
+        final OptionalInt buildNumber = buildNumber();
         if (buildNumber.isPresent()) {
             distance = fetchDistanceFromSiteApi(buildNumber.getAsInt());
         } else {
@@ -135,6 +136,11 @@ public class PaperVersionFetcher implements VersionFetcher {
     }
 
     private record MinecraftVersionFetcher(String latestVersion, int distance) {}
+
+    private static OptionalInt buildNumber() {
+        final OptionalInt compatibilityBuild = PaperCompatibilityVersion.buildNumber();
+        return compatibilityBuild.isPresent() ? compatibilityBuild : BUILD_INFO.buildNumber();
+    }
 
     private static Optional<MinecraftVersionFetcher> fetchMinecraftVersionList() {
         final String currentVersion = PaperVersionFetcher.BUILD_INFO.minecraftVersionId();

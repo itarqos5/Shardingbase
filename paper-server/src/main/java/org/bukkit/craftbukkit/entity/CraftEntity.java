@@ -1153,6 +1153,22 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
         location.checkFinite();
         Location locationClone = location.clone(); // clone so we don't need to worry about mutations after this call.
 
+        // Shardingbase start - a peer-owned player destination must never preload an unowned local chunk
+        if (this instanceof CraftPlayer
+            && !this.server.shardingbaseRuntime().isPlayerTeleportLocallyOwned(locationClone)) {
+            final CompletableFuture<Boolean> remoteResult = new CompletableFuture<>();
+            MinecraftServer.getServer().scheduleOnMain(() -> {
+                try {
+                    remoteResult.complete(this.teleport0(locationClone, cause, teleportFlags));
+                } catch (final Throwable throwable) {
+                    MinecraftServer.LOGGER.error("Failed to route remote player teleport for {}", this, throwable);
+                    remoteResult.completeExceptionally(throwable);
+                }
+            });
+            return remoteResult;
+        }
+        // Shardingbase end
+
         ServerLevel world = ((CraftWorld)locationClone.getWorld()).getHandle();
         CompletableFuture<Boolean> ret = new CompletableFuture<>();
 

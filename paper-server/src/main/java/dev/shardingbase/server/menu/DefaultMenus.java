@@ -34,7 +34,7 @@ final class DefaultMenus {
             button("game-mode", Material.DIAMOND_SWORD, 21, "<green>Game mode", "Game mode and abilities"),
             button("advancements", Material.KNOWLEDGE_BOOK, 22, "<green>Advancements", "Advancement progress"),
             button("statistics", Material.WRITABLE_BOOK, 23, "<green>Statistics", "Player statistics"),
-            button("sync-all", Material.LIME_DYE, 40, "<yellow>Sync every player", "Requires confirmation and an enabled peer"),
+            button("sync-all", Material.LIME_DYE, 40, "<yellow>Sync online players", "One-way portable snapshots to the peer"),
             button("back", Material.ARROW, 49, "<gray>Back", "Return to the main menu")
         ));
         menus.put(CONFIRMATION, menu(CONFIRMATION, "<red>Confirm operation", 3,

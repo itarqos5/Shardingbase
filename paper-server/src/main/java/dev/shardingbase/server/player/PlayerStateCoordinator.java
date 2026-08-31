@@ -24,6 +24,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.bukkit.entity.Player;
@@ -35,16 +36,20 @@ import net.kyori.adventure.text.Component;
 /** Coordinates non-blocking transport and server-thread capture/application of portable player state. */
 public final class PlayerStateCoordinator implements AutoCloseable {
     private static final int QUEUE_CAPACITY = 64;
+    private static final long MANAGED_CAPTURE_TIMEOUT_SECONDS = 20L;
     private static final EnumSet<PlayerDataCategory> ALL_CATEGORIES = EnumSet.allOf(PlayerDataCategory.class);
 
     private final String backendId;
     private final PlayerHandoffClient handoff;
     private final PortablePlayerStateAdapter adapter;
     private final AppliedPlayerRevisionStore revisions;
+    private final Predicate<Location> localDestination;
     private final Logger logger;
     private final ThreadPoolExecutor transport;
+    private final java.util.concurrent.ScheduledExecutorService deadlines;
     private final LocalNodeClient node = new LocalNodeClient();
     private final ConcurrentHashMap<UUID, PlayerHandoffCodec.Capture> managedCaptures = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, PendingRevision> pendingRevisions = new ConcurrentHashMap<>();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean polling = new AtomicBoolean();
     private final AtomicReference<Set<PlayerDataCategory>> selectedCategories = new AtomicReference<>(
@@ -53,11 +58,17 @@ public final class PlayerStateCoordinator implements AutoCloseable {
     private volatile Executor serverExecutor;
     private volatile Thread pollThread;
 
-    public PlayerStateCoordinator(final String backendId, final Path serverDirectory, final Logger logger) {
+    public PlayerStateCoordinator(
+        final String backendId,
+        final Path serverDirectory,
+        final Predicate<Location> localDestination,
+        final Logger logger
+    ) {
         this.backendId = backendId;
         this.handoff = new PlayerHandoffClient(backendId);
         this.adapter = new PortablePlayerStateAdapter();
         this.revisions = new AppliedPlayerRevisionStore(serverDirectory);
+        this.localDestination = java.util.Objects.requireNonNull(localDestination, "localDestination");
         this.logger = logger;
         this.transport = new ThreadPoolExecutor(
             1,
@@ -68,6 +79,10 @@ public final class PlayerStateCoordinator implements AutoCloseable {
             task -> Thread.ofPlatform().daemon(true).name("Shardingbase Player Transport").unstarted(task),
             new ThreadPoolExecutor.AbortPolicy()
         );
+        this.deadlines = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(task -> Thread.ofPlatform()
+            .daemon(true)
+            .name("Shardingbase Player Handoff Deadline")
+            .unstarted(task));
     }
 
     /** Attaches the server-thread executor and starts receiving proxy capture instructions. */
@@ -142,10 +157,87 @@ public final class PlayerStateCoordinator implements AutoCloseable {
         }
     }
 
-    /** Applies a fetched revision on the server thread if it is newer than the durable local ledger. */
-    public void applyIfNew(final Player player, final Optional<PlayerHandoffCodec.Stage> fetched) throws IOException {
-        if (fetched.isEmpty()) {
+    /** Resolves the exact staged spawn before Paper starts loading the player's destination chunks. */
+    public Optional<Location> spawnDestination(final Optional<PlayerHandoffCodec.Stage> fetched) throws IOException {
+        final PlayerHandoffCodec.Stage stage = this.applicableStage(fetched);
+        if (stage == null || stage.destination() == null) {
+            return Optional.empty();
+        }
+        final Location destination = this.requestedDestination(stage.destination());
+        if (!this.localDestination.test(destination)) {
+            throw new IOException("Transfer destination is not owned by this backend");
+        }
+        return Optional.of(destination);
+    }
+
+    /**
+     * Applies a fetched revision on the server thread and returns its safe final spawn,
+     * if the handoff supplied one.
+     */
+    public Optional<Location> applyIfNew(
+        final Player player,
+        final Optional<PlayerHandoffCodec.Stage> fetched,
+        final Location eventDestination
+    ) throws IOException {
+        final PlayerHandoffCodec.Stage stage = this.applicableStage(fetched);
+        if (stage == null) {
+            return Optional.empty();
+        }
+        final PlayerSnapshot snapshot = stage.snapshot();
+        final Location requested = stage.destination() == null ? null : this.requestedDestination(stage.destination());
+        final Location destination;
+        if (requested == null) {
+            destination = null;
+        } else if (!samePosition(requested, eventDestination)) {
+            if (!this.localDestination.test(eventDestination)) {
+                throw new IOException("A spawn plugin selected a destination not owned by this backend");
+            }
+            destination = eventDestination.clone();
+        } else {
+            destination = safeDestination(eventDestination, 4, this.localDestination);
+        }
+        if (stage.destination() != null && destination == null) {
+            throw new IOException("No safe transfer destination exists within four blocks of the requested location");
+        }
+        if (destination != null && !samePosition(requested, destination)) {
+            this.logger.info("Adjusted Shardingbase transfer destination for " + player.getUniqueId()
+                + " from " + format(requested) + " to " + format(destination));
+        }
+        this.adapter.apply(player, snapshot);
+        this.pendingRevisions.compute(snapshot.playerId(), (ignored, existing) ->
+            existing == null || snapshot.revision() > existing.revision()
+                ? new PendingRevision(snapshot.revision(), snapshot.categories().keySet())
+                : existing
+        );
+        return Optional.ofNullable(destination);
+    }
+
+    /** Marks a pending revision only after all selected state files were durably saved. */
+    public void finalizeApplied(
+        final UUID playerId,
+        final boolean playerSaved,
+        final boolean statsSaved,
+        final boolean advancementsSaved
+    ) {
+        final PendingRevision pending = this.pendingRevisions.get(playerId);
+        if (pending == null || !playerSaved
+            || pending.categories().contains(PlayerDataCategory.STATISTICS) && !statsSaved
+            || pending.categories().contains(PlayerDataCategory.ADVANCEMENTS) && !advancementsSaved) {
             return;
+        }
+        try {
+            this.revisions.markApplied(playerId, pending.revision());
+            this.pendingRevisions.remove(playerId, pending);
+        } catch (final IOException exception) {
+            this.logger.log(Level.WARNING, "Unable to finalize portable player revision for " + playerId, exception);
+        }
+    }
+
+    private PlayerHandoffCodec.Stage applicableStage(
+        final Optional<PlayerHandoffCodec.Stage> fetched
+    ) throws IOException {
+        if (fetched.isEmpty()) {
+            return null;
         }
         final PlayerHandoffCodec.Stage stage = fetched.orElseThrow();
         final PlayerSnapshot snapshot = stage.snapshot();
@@ -153,24 +245,19 @@ public final class PlayerStateCoordinator implements AutoCloseable {
             throw new IOException("Player snapshot was staged for a different backend");
         }
         if (!this.revisions.shouldApply(snapshot.playerId(), snapshot.revision())) {
-            return;
+            return null;
         }
-        this.adapter.apply(player, snapshot);
-        if (stage.destination() != null) {
-            this.applyDestination(player, stage.destination());
-        }
-        this.revisions.markApplied(snapshot.playerId(), snapshot.revision());
+        return stage;
     }
 
-    private void applyDestination(
-        final Player player,
+    private Location requestedDestination(
         final PlayerHandoffCodec.TransferDestination destination
     ) throws IOException {
         final World world = Bukkit.getWorld(destination.worldId());
         if (world == null || !world.getKey().toString().equals(destination.worldKey())) {
             throw new IOException("Transfer destination world identity is not loaded on this shard");
         }
-        final Location requested = new Location(
+        return new Location(
             world,
             destination.x(),
             destination.y(),
@@ -178,23 +265,21 @@ public final class PlayerStateCoordinator implements AutoCloseable {
             destination.yaw(),
             destination.pitch()
         );
-        final Location safe = safeDestination(requested, 4);
-        if (safe == null) {
-            throw new IOException("No safe transfer destination exists within four blocks of the crossing");
-        }
-        if (!samePosition(requested, safe)) {
-            this.logger.info("Adjusted Shardingbase transfer destination for " + player.getUniqueId()
-                + " from " + format(requested) + " to " + format(safe));
-        }
-        if (!player.teleport(safe)) {
-            throw new IOException("The target server rejected the safe transfer destination");
-        }
     }
 
     static Location safeDestination(final Location requested, final int radius) {
+        return safeDestination(requested, radius, ignored -> true);
+    }
+
+    static Location safeDestination(
+        final Location requested,
+        final int radius,
+        final Predicate<Location> localDestination
+    ) {
         if (requested.getWorld() == null || radius < 0) {
             throw new IllegalArgumentException("A world and non-negative search radius are required");
         }
+        java.util.Objects.requireNonNull(localDestination, "localDestination");
         final World world = requested.getWorld();
         final int requestedX = requested.getBlockX();
         final int requestedY = requested.getBlockY();
@@ -208,14 +293,14 @@ public final class PlayerStateCoordinator implements AutoCloseable {
                     for (int vertical = 0; vertical <= radius; vertical++) {
                         final int positiveY = requestedY + vertical;
                         final Location positive = candidate(requested, world, requestedX + dx, positiveY, requestedZ + dz);
-                        if (safe(positive)) {
+                        if (localDestination.test(positive) && safe(positive)) {
                             return positive;
                         }
                         if (vertical > 0) {
                             final Location negative = candidate(
                                 requested, world, requestedX + dx, requestedY - vertical, requestedZ + dz
                             );
-                            if (safe(negative)) {
+                            if (localDestination.test(negative) && safe(negative)) {
                                 return negative;
                             }
                         }
@@ -270,19 +355,19 @@ public final class PlayerStateCoordinator implements AutoCloseable {
     /**
      * Captures final post-quit state on the server thread and asynchronously replicates it to the peer.
      */
-    public void captureAndReplicate(final Player player, final String peerBackendId) {
+    public boolean captureAndReplicate(final Player player, final String peerBackendId) {
         final PlayerHandoffCodec.Capture managed = this.managedCaptures.remove(player.getUniqueId());
         final String targetBackendId = managed == null ? peerBackendId : managed.targetBackendId();
         final Set<PlayerDataCategory> categories = managed == null ? this.selectedCategories.get() : managed.categories();
         if (targetBackendId == null || targetBackendId.isBlank()) {
-            return;
+            return false;
         }
         final PlayerSnapshot captured;
         try {
             captured = this.adapter.capture(player, managed == null ? 1 : managed.revision(), this.backendId, categories);
         } catch (final IOException | RuntimeException exception) {
             this.logger.log(Level.WARNING, "Unable to capture portable player state for " + player.getUniqueId(), exception);
-            return;
+            return false;
         }
         try {
             this.transport.execute(() -> {
@@ -304,9 +389,24 @@ public final class PlayerStateCoordinator implements AutoCloseable {
                     );
                 }
             });
+            return true;
         } catch (final RejectedExecutionException exception) {
             this.logger.log(Level.WARNING, "Player transport queue is full; snapshot was not replicated", exception);
+            return false;
         }
+    }
+
+    /** Queues a portable snapshot of every currently online, non-transferring player. */
+    public int replicateOnlinePlayers(final String peerBackendId) {
+        int queued = 0;
+        for (final Player player : Bukkit.getOnlinePlayers()) {
+            if (!this.frozen(player.getUniqueId())) {
+                if (this.captureAndReplicate(player, peerBackendId)) {
+                    queued++;
+                }
+            }
+        }
+        return queued;
     }
 
     /** Returns whether a managed handoff is currently freezing this player's source state. */
@@ -361,7 +461,36 @@ public final class PlayerStateCoordinator implements AutoCloseable {
                 this.managedCaptures.put(capture.playerId(), capture);
             }
             player.closeInventory();
-            player.kick(Component.text("Shardingbase is transferring you to the peer shard…"));
+            this.deadlines.schedule(
+                () -> this.expireManagedCapture(capture),
+                MANAGED_CAPTURE_TIMEOUT_SECONDS,
+                TimeUnit.SECONDS
+            );
+            if (player instanceof final org.bukkit.craftbukkit.entity.CraftPlayer craftPlayer) {
+                craftPlayer.getHandle().connection.shardingbaseDisconnect(
+                    io.papermc.paper.adventure.PaperAdventure.asVanilla(
+                        Component.text("Shardingbase is transferring you to the peer shard…")
+                    )
+                );
+            } else {
+                player.kick(Component.text("Shardingbase is transferring you to the peer shard…"));
+            }
+        });
+    }
+
+    private void expireManagedCapture(final PlayerHandoffCodec.Capture capture) {
+        final Executor executor = this.serverExecutor;
+        if (executor == null || this.closed.get()) {
+            return;
+        }
+        executor.execute(() -> {
+            if (!this.managedCaptures.remove(capture.playerId(), capture)) {
+                return;
+            }
+            final Player player = Bukkit.getPlayer(capture.playerId());
+            if (player != null && player.isOnline()) {
+                player.sendMessage(Component.text("Shardingbase transfer timed out; player state was unfrozen."));
+            }
         });
     }
 
@@ -373,5 +502,12 @@ public final class PlayerStateCoordinator implements AutoCloseable {
             currentPollThread.interrupt();
         }
         this.transport.shutdownNow();
+        this.deadlines.shutdownNow();
+    }
+
+    private record PendingRevision(long revision, Set<PlayerDataCategory> categories) {
+        private PendingRevision {
+            categories = Set.copyOf(categories);
+        }
     }
 }

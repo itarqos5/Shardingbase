@@ -1,0 +1,593 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: itarqos5 <soqratiakram33@gmail.com>
+Date: Mon, 31 Aug 2026 02:49:07 +0100
+Subject: [PATCH] Restore managed player state without plugin side effects
+
+
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
+index 45c927417d34ddd48c92116efd9b5777bfc52e35..6d7668b20f96dfb3a8019cf7edfdf05b1d422d11 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
+@@ -328,6 +328,13 @@ public final class RegionizedPlayerChunkLoader {
+         private final ServerPlayer player;
+         private final ServerLevel world;
+
++        private boolean shardingbaseOwns(final int chunkX, final int chunkZ) {
++            final org.bukkit.World world = this.world.getWorld();
++            return this.world.getCraftServer().shardingbaseRuntime().isChunkLocallyOwned(
++                world.getKey().toString(), world.getUID(), chunkX, chunkZ
++            );
++        }
++
+         private int lastChunkX = Integer.MIN_VALUE;
+         private int lastChunkZ = Integer.MIN_VALUE;
+
+@@ -704,6 +711,11 @@ public final class RegionizedPlayerChunkLoader {
+                 final LongArrayList chunks = new LongArrayList(maxLoadsThisTick);
+                 for (int i = 0; i < maxLoadsThisTick; ++i) {
+                     final long chunk = this.loadQueue.dequeueLong();
++                    final int chunkX = CoordinateUtils.getChunkX(chunk);
++                    final int chunkZ = CoordinateUtils.getChunkZ(chunk);
++                    if (!this.shardingbaseOwns(chunkX, chunkZ)) {
++                        continue;
++                    }
+                     final byte prev = this.chunkTicketStage.put(chunk, CHUNK_TICKET_STAGE_LOADING);
+                     if (prev != CHUNK_TICKET_STAGE_NONE) {
+                         throw new IllegalStateException("Previous state should be " + CHUNK_TICKET_STAGE_NONE + ", not " + prev);
+@@ -730,7 +742,7 @@ public final class RegionizedPlayerChunkLoader {
+                     return;
+                 }
+
+-                for (int i = 0; i < maxLoadsThisTick; ++i) {
++                for (int i = 0, len = chunks.size(); i < len; ++i) {
+                     final long queuedLoadChunk = chunks.getLong(i);
+                     final int queuedChunkX = CoordinateUtils.getChunkX(queuedLoadChunk);
+                     final int queuedChunkZ = CoordinateUtils.getChunkZ(queuedLoadChunk);
+@@ -1001,6 +1013,9 @@ public final class RegionizedPlayerChunkLoader {
+                 final int dz = CoordinateUtils.getChunkZ(deltaChunk);
+                 final int chunkX = dx + currentChunkX;
+                 final int chunkZ = dz + currentChunkZ;
++                if (!this.shardingbaseOwns(chunkX, chunkZ)) {
++                    continue;
++                }
+                 final long chunk = CoordinateUtils.getChunkKey(chunkX, chunkZ);
+                 final int squareDistance = Math.max(Math.abs(dx), Math.abs(dz));
+                 final int manhattanDistance = Math.abs(dx) + Math.abs(dz);
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
+index 640548d78b87653871dd1f7b0f84574c5e205fe8..366d1d594f1e04983dc38321c0751fc4ddd1bbef 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/ChunkTaskScheduler.java
+@@ -118,6 +118,21 @@ public final class ChunkTaskScheduler {
+
+     public final ChunkHolderManager chunkHolderManager;
+
++    private boolean shardingbaseOwns(final int chunkX, final int chunkZ) {
++        final org.bukkit.World world = this.world.getWorld();
++        return this.world.getCraftServer().shardingbaseRuntime().isChunkLocallyOwned(
++            world.getKey().toString(), world.getUID(), chunkX, chunkZ
++        );
++    }
++
++    private void shardingbaseReject(final int chunkX, final int chunkZ) {
++        final org.bukkit.World world = this.world.getWorld();
++        this.world.getCraftServer().shardingbaseRuntime().requireLocalChunk(
++            world.getKey().toString(), world.getUID(), chunkX, chunkZ,
++            "synchronous Moonrise chunk load", "Minecraft chunk scheduler"
++        );
++    }
++
+     static {
+         ((ChunkSystemChunkStatus)ChunkStatus.EMPTY).moonrise$setWriteRadius(0);
+         ((ChunkSystemChunkStatus)ChunkStatus.STRUCTURE_STARTS).moonrise$setWriteRadius(0);
+@@ -459,6 +474,12 @@ public final class ChunkTaskScheduler {
+
+     public void scheduleChunkLoad(final int chunkX, final int chunkZ, final boolean gen, final ChunkStatus toStatus, final boolean addTicket,
+                                   final Priority priority, final Consumer<ChunkAccess> onComplete) {
++        if (!this.shardingbaseOwns(chunkX, chunkZ)) {
++            if (onComplete != null) {
++                onComplete.accept(null);
++            }
++            return;
++        }
+         if (gen) {
+             this.scheduleChunkLoad(chunkX, chunkZ, toStatus, addTicket, priority, onComplete);
+             return;
+@@ -483,6 +504,9 @@ public final class ChunkTaskScheduler {
+     // only appropriate to use with syncLoadNonFull
+     public boolean beginChunkLoadForNonFullSync(final int chunkX, final int chunkZ, final ChunkStatus toStatus,
+                                                 final Priority priority) {
++        if (!this.shardingbaseOwns(chunkX, chunkZ)) {
++            return false;
++        }
+         final int accessRadius = getAccessRadius(toStatus);
+         final long chunkKey = CoordinateUtils.getChunkKey(chunkX, chunkZ);
+         final int minLevel = ChunkTaskScheduler.getTicketLevel(toStatus);
+@@ -524,6 +548,7 @@ public final class ChunkTaskScheduler {
+     // one main thread. On Folia, it is required that the non-full load can occur completely asynchronously to avoid deadlock
+     // between regions
+     public ChunkAccess syncLoadNonFull(final int chunkX, final int chunkZ, final ChunkStatus status) {
++        this.shardingbaseReject(chunkX, chunkZ);
+         if (status == null || status.isOrAfter(ChunkStatus.FULL)) {
+             throw new IllegalArgumentException("Status: " + status);
+         }
+@@ -570,6 +595,12 @@ public final class ChunkTaskScheduler {
+
+     public void scheduleChunkLoad(final int chunkX, final int chunkZ, final ChunkStatus toStatus, final boolean addTicket,
+                                   final Priority priority, final Consumer<ChunkAccess> onComplete) {
++        if (!this.shardingbaseOwns(chunkX, chunkZ)) {
++            if (onComplete != null) {
++                onComplete.accept(null);
++            }
++            return;
++        }
+         if (!TickThread.isTickThreadFor(this.world, chunkX, chunkZ)) {
+             this.scheduleChunkTask(chunkX, chunkZ, () -> {
+                 ChunkTaskScheduler.this.scheduleChunkLoad(chunkX, chunkZ, toStatus, addTicket, priority, onComplete);
+diff --git a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
+index 9a9a599ef178f851ee5c783631a724013a693586..bbc0ecc23fee2b58bc9ca3794a27400467e6adc8 100644
+--- a/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
++++ b/ca/spottedleaf/moonrise/patches/chunk_system/scheduling/NewChunkHolder.java
+@@ -1141,8 +1141,12 @@ public final class NewChunkHolder {
+     private boolean updatePendingStatus() {
+         final FullChunkStatus byTicketLevel = ChunkLevel.fullStatus(this.oldTicketLevel); // oldTicketLevel is controlled by scheduling lock
+
+-        FullChunkStatus pending = getStatusForBitset(this.fullNeighbourChunksLoadedBitset);
+-        if (pending == FullChunkStatus.INACCESSIBLE && byTicketLevel.isOrAfter(FullChunkStatus.FULL) && this.currentGenStatus == ChunkStatus.FULL) {
++        final boolean shardingbaseOwns = this.shardingbaseOwns();
++        FullChunkStatus pending = shardingbaseOwns
++            ? getStatusForBitset(this.fullNeighbourChunksLoadedBitset)
++            : FullChunkStatus.INACCESSIBLE;
++        if (shardingbaseOwns && pending == FullChunkStatus.INACCESSIBLE
++            && byTicketLevel.isOrAfter(FullChunkStatus.FULL) && this.currentGenStatus == ChunkStatus.FULL) {
+             // the bitset is only for chunks that have gone through the status updater
+             // but here we are ready to go to FULL
+             pending = FullChunkStatus.FULL;
+@@ -1644,8 +1648,18 @@ public final class NewChunkHolder {
+
+     private static final MoonriseRegionFileIO.RegionFileType[] REGION_FILE_TYPES = MoonriseRegionFileIO.RegionFileType.values();
+
++    private boolean shardingbaseOwns() {
++        final org.bukkit.World world = this.world.getWorld();
++        return this.world.getCraftServer().shardingbaseRuntime().isChunkLocallyOwned(
++            world.getKey().toString(), world.getUID(), this.chunkX, this.chunkZ
++        );
++    }
++
+     public SaveStat save(final boolean shutdown) {
+         TickThread.ensureTickThread(this.world, this.chunkX, this.chunkZ, "Cannot save data off-main");
++        if (!this.shardingbaseOwns()) {
++            return null;
++        }
+
+         ChunkAccess chunk = this.getCurrentChunk();
+         PoiChunk poi = this.getPoiChunk();
+@@ -1704,6 +1718,9 @@ public final class NewChunkHolder {
+     }
+
+     private boolean saveChunk(final ChunkAccess chunk, final boolean unloading, final Completable<CompoundTag>[] chunkSave) {
++        if (!this.shardingbaseOwns()) {
++            return false;
++        }
+         if (!chunk.isUnsaved()) {
+             return false;
+         }
+@@ -1754,6 +1771,9 @@ public final class NewChunkHolder {
+
+     private boolean lastEntitySaveNull;
+     private boolean saveEntities(final ChunkEntitySlices entities, final boolean unloading, final Completable<CompoundTag>[] entitySave) {
++        if (!this.shardingbaseOwns()) {
++            return false;
++        }
+         try {
+             if (entities.isTransient()) {
+                 if (!unloading) {
+@@ -1810,6 +1830,9 @@ public final class NewChunkHolder {
+
+     private boolean lastPoiSaveNull;
+     private boolean savePOI(final PoiChunk poi, final boolean unloading, final Completable<CompoundTag>[] poiSave) {
++        if (!this.shardingbaseOwns()) {
++            return false;
++        }
+         try {
+             final CompoundTag save = poi.save();
+             poi.setDirty(false);
+diff --git a/net/minecraft/server/PlayerAdvancements.java b/net/minecraft/server/PlayerAdvancements.java
+index d447b444abd9b62ab241419301a96d19ae77a7eb..7dbd360cd1bcb38dd9c5d96fcdfa4043d2466c6d 100644
+--- a/net/minecraft/server/PlayerAdvancements.java
++++ b/net/minecraft/server/PlayerAdvancements.java
+@@ -127,7 +127,12 @@ public class PlayerAdvancements {
+     }
+
+     public void save() {
+-        if (org.spigotmc.SpigotConfig.disableAdvancementSaving) return; // Spigot
++        this.shardingbaseSave();
++    }
++
++    // Shardingbase start - report durable handoff state saves
++    public boolean shardingbaseSave() {
++        if (org.spigotmc.SpigotConfig.disableAdvancementSaving) return false; // Spigot
+         JsonElement json = this.codec.encodeStart(JsonOps.INSTANCE, this.asData()).getOrThrow();
+
+         try {
+@@ -136,10 +141,13 @@ public class PlayerAdvancements {
+             try (Writer outputWriter = Files.newBufferedWriter(this.playerSavePath, StandardCharsets.UTF_8)) {
+                 GSON.toJson(json, GSON.newJsonWriter(outputWriter));
+             }
++            return true;
+         } catch (IOException | JsonIOException e) {
+             LOGGER.error("Couldn't save player advancements to {}", this.playerSavePath, e);
++            return false;
+         }
+     }
++    // Shardingbase end - report durable handoff state saves
+
+     private void applyFrom(final ServerAdvancementManager manager, final PlayerAdvancements.Data data) {
+         data.forEach((id, progress) -> {
+@@ -165,6 +173,40 @@ public class PlayerAdvancements {
+         return new PlayerAdvancements.Data(map);
+     }
+
++    // Shardingbase start - event- and reward-free pre-join state restoration
++    public void shardingbaseRestoreProgress(
++        final ServerAdvancementManager manager,
++        final Map<Identifier, Set<String>> restored
++    ) {
++        this.clearTriggers();
++        this.progress.clear();
++        this.visible.clear();
++        this.rootsToUpdate.clear();
++        this.progressChanged.clear();
++        this.isFirstPacket = true;
++        this.lastSelectedTab = null;
++        this.tree = manager.tree();
++        for (final Entry<Identifier, Set<String>> entry : restored.entrySet()) {
++            final AdvancementHolder holder = manager.get(entry.getKey());
++            if (holder == null) {
++                throw new IllegalArgumentException("Unknown advancement " + entry.getKey());
++            }
++            final AdvancementProgress advancementProgress = this.getOrStartProgress(holder);
++            for (final String criterion : entry.getValue()) {
++                if (advancementProgress.getCriterion(criterion) == null) {
++                    throw new IllegalArgumentException("Unknown criterion " + criterion + " for " + entry.getKey());
++                }
++                advancementProgress.grantProgress(criterion);
++            }
++            this.progressChanged.add(holder);
++        }
++        for (final AdvancementHolder holder : manager.getAllAdvancements()) {
++            this.registerListeners(holder);
++            this.markForVisibilityUpdate(holder);
++        }
++    }
++    // Shardingbase end - event- and reward-free pre-join state restoration
++
+     public boolean award(final AdvancementHolder holder, final String criterion) {
+         boolean result = false;
+         AdvancementProgress progress = this.getOrStartProgress(holder);
+diff --git a/net/minecraft/server/level/ChunkMap.java b/net/minecraft/server/level/ChunkMap.java
+index 7e9361407042ddaabe3f66ee8957ae84b6ef2317..da65a2373f7d0e4fde3c080b3fdbac4722d7fad2 100644
+--- a/net/minecraft/server/level/ChunkMap.java
++++ b/net/minecraft/server/level/ChunkMap.java
+@@ -583,6 +583,12 @@ public class ChunkMap extends SimpleRegionStorage implements ChunkHolder.PlayerP
+
+     @Override
+     public CompletableFuture<Void> write(final ChunkPos pos, final Supplier<CompoundTag> tag) {
++        final org.bukkit.World world = this.level.getWorld();
++        if (!this.level.getCraftServer().shardingbaseRuntime().isChunkLocallyOwned(
++            world.getKey().toString(), world.getUID(), pos.x(), pos.z()
++        )) {
++            return CompletableFuture.completedFuture(null);
++        }
+         ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.scheduleSave(
+             this.level, pos.x(), pos.z(), tag.get(),
+             ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionFileType.CHUNK_DATA
+diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
+index 075e294333115738b25b64a390df323276cf39f9..03706dc39ecc8195e9b0b1d22c9c2bec58ba196e 100644
+--- a/net/minecraft/server/level/ServerChunkCache.java
++++ b/net/minecraft/server/level/ServerChunkCache.java
+@@ -232,6 +232,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+
+     // CraftBukkit start - properly implement isChunkLoaded
+     public boolean isChunkLoaded(int chunkX, int chunkZ) {
++        if (!this.shardingbaseOwns(chunkX, chunkZ)) return false; // Shardingbase
+         ChunkHolder chunk = this.chunkMap.getUpdatingChunkIfPresent(ChunkPos.pack(chunkX, chunkZ));
+         if (chunk == null) {
+             return false;
+@@ -244,6 +245,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+
+     @Nullable
+     public ChunkAccess getChunkAtImmediately(int x, int z) {
++        if (!this.shardingbaseOwns(x, z)) return null; // Shardingbase
+         ChunkHolder holder = this.chunkMap.getVisibleChunkIfPresent(ChunkPos.pack(x, z));
+         if (holder == null) {
+             return null;
+@@ -253,6 +255,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+     }
+
+     public void addTicketAtLevel(TicketType ticketType, ChunkPos chunkPos, int ticketLevel) {
++        if (!this.shardingbaseOwns(chunkPos.x(), chunkPos.z())) return; // Shardingbase
+         this.ticketStorage.addTicket(new Ticket(ticketType, ticketLevel), chunkPos);
+     }
+
+@@ -264,6 +267,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+     // Note: Partially copied from the getChunkAt method below
+     @Nullable
+     public LevelChunk getChunkAtIfCachedImmediately(int x, int z) {
++        if (!this.shardingbaseOwns(x, z)) return null; // Shardingbase
+         long key = ChunkPos.pack(x, z);
+
+         // Note: Bypass cache since we need to check ticket level, and to make this MT-Safe
+@@ -278,6 +282,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+
+     @Nullable
+     public LevelChunk getChunkAtIfLoadedImmediately(int x, int z) {
++        if (!this.shardingbaseOwns(x, z)) return null; // Shardingbase
+         return this.fullChunks.get(ChunkPos.pack(x, z));
+     }
+     // Paper end
+@@ -305,6 +310,12 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+
+     @Override
+     public @Nullable ChunkAccess getChunk(final int x, final int z, final ChunkStatus targetStatus, final boolean loadOrGenerate) {
++        if (!this.shardingbaseOwns(x, z)) { // Shardingbase - guard lazy Bukkit and NMS access
++            if (loadOrGenerate) {
++                this.shardingbaseReject(x, z, "NMS chunk load/generation");
++            }
++            return null;
++        }
+         // Paper start - rewrite chunk system
+         if (targetStatus == ChunkStatus.FULL) {
+             final LevelChunk ret = this.fullChunks.get(ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkKey(x, z));
+@@ -322,6 +333,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+
+     @Override
+     public @Nullable LevelChunk getChunkNow(final int x, final int z) {
++        if (!this.shardingbaseOwns(x, z)) return null; // Shardingbase
+         // Paper start - rewrite chunk system
+         final LevelChunk ret = this.fullChunks.get(ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkKey(x, z));
+         if (!ca.spottedleaf.moonrise.common.PlatformHooks.get().hasCurrentlyLoadingChunk()) {
+@@ -348,7 +360,29 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+         Arrays.fill(this.lastChunk, null);
+     }
+
++    // Shardingbase start - immutable shard ownership below Bukkit chunk wrappers
++    private boolean shardingbaseOwns(final int chunkX, final int chunkZ) {
++        final org.bukkit.World world = this.level.getWorld();
++        return this.level.getCraftServer().shardingbaseRuntime().isChunkLocallyOwned(
++            world.getKey().toString(), world.getUID(), chunkX, chunkZ
++        );
++    }
++
++    private void shardingbaseReject(final int chunkX, final int chunkZ, final String operation) {
++        final org.bukkit.World world = this.level.getWorld();
++        this.level.getCraftServer().shardingbaseRuntime().requireLocalChunk(
++            world.getKey().toString(), world.getUID(), chunkX, chunkZ, operation, "Minecraft chunk source"
++        );
++    }
++    // Shardingbase end - immutable shard ownership below Bukkit chunk wrappers
++
+     public CompletableFuture<ChunkResult<ChunkAccess>> getChunkFuture(final int x, final int z, final ChunkStatus targetStatus, final boolean loadOrGenerate) {
++        if (!this.shardingbaseOwns(x, z)) { // Shardingbase
++            if (loadOrGenerate) {
++                this.shardingbaseReject(x, z, "asynchronous NMS chunk load/generation");
++            }
++            return ChunkHolder.UNLOADED_CHUNK_FUTURE;
++        }
+         boolean isMainThread = Thread.currentThread() == this.mainThread;
+         CompletableFuture<ChunkResult<ChunkAccess>> serverFuture;
+         if (isMainThread) {
+@@ -416,6 +450,7 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
+
+     @Override
+     public @Nullable LightChunk getChunkForLighting(final int x, final int z) {
++        if (!this.shardingbaseOwns(x, z)) return null; // Shardingbase
+         // Paper start - rewrite chunk system
+         final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder newChunkHolder = ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)this.level).moonrise$getChunkTaskScheduler().chunkHolderManager.getChunkHolder(x, z);
+         if (newChunkHolder == null) {
+diff --git a/net/minecraft/server/level/ServerPlayerGameMode.java b/net/minecraft/server/level/ServerPlayerGameMode.java
+index 27bdb82793250b33b457fe027c003948000857c9..05f95a2882ac63609751f1ef8151d1c4af7a2b5e 100644
+--- a/net/minecraft/server/level/ServerPlayerGameMode.java
++++ b/net/minecraft/server/level/ServerPlayerGameMode.java
+@@ -103,6 +103,12 @@ public class ServerPlayerGameMode {
+         gameModeForPlayer.updatePlayerAbilities(abilities);
+     }
+
++    // Shardingbase start - event-free pre-join state restoration
++    public void shardingbaseRestoreGameMode(final GameType gameModeForPlayer) {
++        this.setGameModeForPlayer(gameModeForPlayer, this.gameModeForPlayer);
++    }
++    // Shardingbase end - event-free pre-join state restoration
++
+     private boolean isInRangeOfGround() {
+         List<VoxelShape> clipping = Entity.collectAllColliders(this.player, this.level, this.player.getBoundingBox());
+         return clipping.isEmpty() && this.player.getAvailableSpaceBelow(1.0) < 1.0;
+diff --git a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+index 5dbb2849f32ac3418f8fdf76c04022d7e9dc165b..515acb8c9d15ff3e7e7afd69226866ca66192ef6 100644
+--- a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+@@ -412,6 +412,24 @@ public abstract class ServerCommonPacketListenerImpl implements ServerCommonPack
+         this.connection.handleConnectionDisconnectOnNextTick = true; // Paper - Force kill connection ticking. Let this close the connection
+     }
+
++    // Shardingbase start - managed handoffs cannot be vetoed by unrelated kick listeners
++    public final void shardingbaseDisconnect(final Component reason) {
++        if (!this.connection.isConnected()) {
++            return;
++        }
++        if (this instanceof ServerGamePacketListenerImpl gamePacketListener) {
++            gamePacketListener.player.quitReason = org.bukkit.event.player.PlayerQuitEvent.QuitReason.KICKED;
++        }
++        this.disconnect0(new DisconnectionDetails(
++            reason,
++            java.util.Optional.empty(),
++            java.util.Optional.empty(),
++            java.util.Optional.empty(),
++            java.util.Optional.of(io.papermc.paper.connection.DisconnectionReason.UNKNOWN)
++        ));
++    }
++    // Shardingbase end - managed handoffs cannot be vetoed by unrelated kick listeners
++
+     // Paper start - add proper async disconnect
+     public final void disconnectAsync(Component component, io.papermc.paper.connection.DisconnectionReason reason) {
+         this.disconnectAsync(new DisconnectionDetails(component, java.util.Optional.empty(), java.util.Optional.empty(), java.util.Optional.empty(), java.util.Optional.of(reason)));
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 9cfa52bcb1939ff39125f0ede903d48580fc2917..9582a3c2e9fa34063032964345c1a7a18a885d4e 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -415,16 +415,21 @@ public abstract class PlayerList {
+     protected void save(final ServerPlayer player) {
+         if (!player.getBukkitEntity().isPersistent()) return; // CraftBukkit
+         player.lastSave = MinecraftServer.currentTick; // Paper - Incremental chunk and player saving
+-        this.playerIo.save(player);
++        final boolean shardingbasePlayerSaved = this.playerIo.shardingbaseSave(player); // Shardingbase
+         ServerStatsCounter stats = player.getStats(); // CraftBukkit
++        boolean shardingbaseStatsSaved = true; // Shardingbase
+         if (stats != null) {
+-            stats.save();
++            shardingbaseStatsSaved = stats.shardingbaseSave(); // Shardingbase
+         }
+
+         PlayerAdvancements advancements = player.getAdvancements(); // CraftBukkit
++        boolean shardingbaseAdvancementsSaved = true; // Shardingbase
+         if (advancements != null) {
+-            advancements.save();
++            shardingbaseAdvancementsSaved = advancements.shardingbaseSave(); // Shardingbase
+         }
++        this.cserver.shardingbaseRuntime().finalizePlayerState(
++            player.getUUID(), shardingbasePlayerSaved, shardingbaseStatsSaved, shardingbaseAdvancementsSaved
++        ); // Shardingbase - only advance the handoff ledger after the relevant files are durable
+     }
+
+     public net.kyori.adventure.text.@Nullable Component remove(final ServerPlayer player) { // CraftBukkit - return string // Paper - return Component
+diff --git a/net/minecraft/stats/ServerStatsCounter.java b/net/minecraft/stats/ServerStatsCounter.java
+index f5beb001b938072e78c0ead7e0ad0499784ed1cf..1b7e67ca6d74d8a513921597ddba84981eec47ad 100644
+--- a/net/minecraft/stats/ServerStatsCounter.java
++++ b/net/minecraft/stats/ServerStatsCounter.java
+@@ -89,17 +89,25 @@ public class ServerStatsCounter extends StatsCounter {
+     }
+
+     public void save() {
+-        if (org.spigotmc.SpigotConfig.disableStatSaving) return; // Spigot
++        this.shardingbaseSave();
++    }
++
++    // Shardingbase start - report durable handoff state saves
++    public boolean shardingbaseSave() {
++        if (org.spigotmc.SpigotConfig.disableStatSaving) return false; // Spigot
+         try {
+             FileUtil.createDirectoriesSafe(this.file.getParent());
+
+             try (Writer writer = Files.newBufferedWriter(this.file, StandardCharsets.UTF_8)) {
+                 GSON.toJson(this.toJson(), GSON.newJsonWriter(writer));
+             }
++            return true;
+         } catch (IOException | JsonIOException e) {
+             LOGGER.error("Couldn't save stats to {}", this.file, e);
++            return false;
+         }
+     }
++    // Shardingbase end - report durable handoff state saves
+
+     @Override
+     public void setValue(final Player player, final Stat<?> stat, final int count) {
+diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
+index 3a4da514c163e7565fc241835db52c464a5c4734..b3bad48d01acd96c094e03e92e34acde94593123 100644
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -1125,6 +1125,21 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         return this.activeEffects;
+     }
+
++    // Shardingbase start - event-free pre-join state restoration
++    public void shardingbaseRestoreEffects(final Collection<MobEffectInstance> restoredEffects) {
++        final List<MobEffectInstance> previous = List.copyOf(this.activeEffects.values());
++        this.activeEffects.clear();
++        this.onEffectsRemoved(previous);
++        for (final MobEffectInstance restored : restoredEffects) {
++            final MobEffectInstance effect = new MobEffectInstance(restored);
++            this.activeEffects.put(effect.getEffect(), effect);
++            this.onEffectAdded(effect, null);
++            effect.onEffectAdded(this);
++        }
++        this.updateDirtyEffects();
++    }
++    // Shardingbase end - event-free pre-join state restoration
++
+     public boolean hasEffect(final Holder<MobEffect> effect) {
+         return this.activeEffects.containsKey(effect);
+     }
+diff --git a/net/minecraft/world/level/chunk/ChunkGenerator.java b/net/minecraft/world/level/chunk/ChunkGenerator.java
+index 1624d73d63a848b1eced1964193f14f7ab9c1bc2..1aa1d69eaa4ffe69234a79ad2c3732bb1fcbd28b 100644
+--- a/net/minecraft/world/level/chunk/ChunkGenerator.java
++++ b/net/minecraft/world/level/chunk/ChunkGenerator.java
+@@ -461,7 +461,8 @@ public abstract class ChunkGenerator {
+
+         org.bukkit.World world = level.getMinecraftWorld().getWorld();
+         // only call when a populator is present (prevents unnecessary entity conversion)
+-        if (!world.getPopulators().isEmpty()) {
++        if (!world.getPopulators().isEmpty() && level.getMinecraftWorld().getCraftServer().shardingbaseRuntime()
++            .isChunkLocallyOwned(world.getKey().toString(), world.getUID(), chunk.getPos().x(), chunk.getPos().z())) {
+             org.bukkit.craftbukkit.generator.CraftLimitedRegion limitedRegion = new org.bukkit.craftbukkit.generator.CraftLimitedRegion(level, chunk.getPos());
+             int x = chunk.getPos().x();
+             int z = chunk.getPos().z();
+diff --git a/net/minecraft/world/level/chunk/LevelChunk.java b/net/minecraft/world/level/chunk/LevelChunk.java
+index 681563230061212afa7994c8eb16c068754db5dd..95e5767112b551f6d1c3f490ad9dd23f860c4d40 100644
+--- a/net/minecraft/world/level/chunk/LevelChunk.java
++++ b/net/minecraft/world/level/chunk/LevelChunk.java
+@@ -628,7 +628,15 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+     }
+
+     // CraftBukkit start
++    private boolean shardingbaseOwns() {
++        final org.bukkit.World world = this.level.getWorld();
++        return this.level.getCraftServer().shardingbaseRuntime().isChunkLocallyOwned(
++            world.getKey().toString(), world.getUID(), this.locX, this.locZ
++        );
++    }
++
+     public void loadCallback() {
++        if (!this.shardingbaseOwns()) return; // Shardingbase - dependency halo has no Bukkit lifecycle
+         if (this.loadedTicketLevel) { LOGGER.error("Double calling chunk load!", new Throwable()); } // Paper
+         // Paper start
+         this.loadedTicketLevel = true;
+@@ -670,6 +678,7 @@ public class LevelChunk extends ChunkAccess implements DebugValueSource, ca.spot
+     }
+
+     public void unloadCallback() {
++        if (!this.shardingbaseOwns()) return; // Shardingbase - dependency halo has no Bukkit lifecycle
+         if (!this.loadedTicketLevel) { LOGGER.error("Double calling chunk unload!", new Throwable()); } // Paper
+         org.bukkit.Server server = this.level.getCraftServer();
+         org.bukkit.craftbukkit.event.CraftEventFactory.callEntitiesUnloadEvent(this.level, this.chunkPos, ((ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel)this.level).moonrise$getChunkTaskScheduler().chunkHolderManager.getChunkHolder(this.locX, this.locZ).getEntityChunk().getAllEntities()); // Paper - rewrite chunk system
+diff --git a/net/minecraft/world/level/storage/PlayerDataStorage.java b/net/minecraft/world/level/storage/PlayerDataStorage.java
+index eddb6ebe3fa50a818e54079b73ba117be0abd195..91211fef7a1407fa1614bd0ed395f152c84b03d6 100644
+--- a/net/minecraft/world/level/storage/PlayerDataStorage.java
++++ b/net/minecraft/world/level/storage/PlayerDataStorage.java
+@@ -31,7 +31,12 @@ public class PlayerDataStorage {
+     }
+
+     public void save(final Player player) {
+-        if (org.spigotmc.SpigotConfig.disablePlayerDataSaving) return; // Spigot
++        this.shardingbaseSave(player);
++    }
++
++    // Shardingbase start - report durable handoff state saves
++    public boolean shardingbaseSave(final Player player) {
++        if (org.spigotmc.SpigotConfig.disablePlayerDataSaving) return false; // Spigot
+         try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(player.problemPath(), LOGGER)) {
+             TagValueOutput output = TagValueOutput.createWithContext(reporter, player.registryAccess());
+             player.saveWithoutId(output);
+@@ -41,11 +46,13 @@ public class PlayerDataStorage {
+             NbtIo.writeCompressed(dataToStore, tmpFile);
+             Path realFile = playerDirPath.resolve(player.getStringUUID() + ".dat");
+             Path oldFile = playerDirPath.resolve(player.getStringUUID() + ".dat_old");
+-            Util.safeReplaceFile(realFile, tmpFile, oldFile);
++            return Util.safeReplaceOrMoveFile(realFile, tmpFile, oldFile, false);
+         } catch (Exception ignored) {
+             LOGGER.warn("Failed to save player data for {}", player.getPlainTextName(), ignored); // Paper - Print exception
++            return false;
+         }
+     }
++    // Shardingbase end - report durable handoff state saves
+
+     private void backup(final NameAndId nameAndId, final String suffix) {
+         Path playerDirPath = this.playerDir.toPath();

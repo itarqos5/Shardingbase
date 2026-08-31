@@ -1,15 +1,16 @@
 --- a/net/minecraft/server/network/config/PrepareSpawnTask.java
 +++ b/net/minecraft/server/network/config/PrepareSpawnTask.java
-@@ -36,29 +_,89 @@
+@@ -36,31 +_,125 @@
      private final LevelLoadListener loadListener;
      private PrepareSpawnTask.@Nullable State state;
- 
+
 -    public PrepareSpawnTask(final MinecraftServer server, final NameAndId nameAndId) {
 +    // Paper start - passthrough profile and packet listener
 +    private final com.mojang.authlib.GameProfile profile;
 +    private final net.minecraft.server.network.ServerConfigurationPacketListenerImpl listener;
 +    private boolean newPlayer;
 +    private java.util.concurrent.CompletableFuture<java.util.Optional<dev.shardingbase.protocol.PlayerHandoffCodec.Stage>> shardingbasePlayerState; // Shardingbase
++    private volatile boolean shardingbaseClosed; // Shardingbase
 +
 +    public PrepareSpawnTask(final MinecraftServer server, final com.mojang.authlib.GameProfile profile, final net.minecraft.server.network.ServerConfigurationPacketListenerImpl listener) {
 +        this.profile = profile;
@@ -21,18 +22,31 @@
 +        this.nameAndId = new net.minecraft.server.players.NameAndId(profile); // Paper - passthrough profile and packet listener - create from profile
 +        this.loadListener = LevelLoadListener.noop(); // Paper - per level load listener - this is already a no-op on dedicated server, but we moved it to Level
      }
- 
+
      @Override
      public void start(final Consumer<Packet<?>> connection) {
 +        // Shardingbase start - fetch portable state without blocking the server thread
 +        this.shardingbasePlayerState = this.server.server.shardingbaseRuntime()
 +            .fetchPlayerState(this.nameAndId.id())
-+            .toCompletableFuture()
-+            .exceptionally(exception -> {
-+                LOGGER.warn("Unable to fetch staged Shardingbase player state for {}", this.nameAndId.id(), exception);
-+                return java.util.Optional.empty();
-+            });
++            .toCompletableFuture();
++        this.shardingbasePlayerState.whenComplete((ignored, failure) -> this.server.execute(() -> {
++            if (this.shardingbaseClosed) {
++                return;
++            }
++            if (failure != null) {
++                LOGGER.warn("Unable to fetch staged Shardingbase player state for {}", this.nameAndId.id(), failure);
++                this.listener.disconnect(net.minecraft.network.chat.Component.literal(
++                    "Shardingbase could not verify distributed player state. Please reconnect."
++                ));
++                this.close();
++                return;
++            }
++            this.prepareSpawn();
++        }));
 +        // Shardingbase end
++    }
++
++    private void prepareSpawn() { // Shardingbase - resume configuration after asynchronous staging lookup
          try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(LOGGER)) {
              Optional<ValueInput> loadedData = this.server
                  .getPlayerList()
@@ -89,18 +103,49 @@
 +                    spawnLevel = spawnDataLevel;
 +                }
 +            }
-+            final ServerLevel finalSpawnLevel = spawnLevel;
++            final ServerLevel defaultSpawnLevel = spawnLevel;
++            ServerLevel selectedSpawnLevel = defaultSpawnLevel;
              CompletableFuture<Vec3> spawnPosition = loadedPosition.position()
                  .map(CompletableFuture::completedFuture)
 -                .orElseGet(() -> PlayerSpawnFinder.findSpawn(spawnLevel, respawnData.pos()));
-+                .orElseGet(() -> PlayerSpawnFinder.findSpawn(finalSpawnLevel, respawnData.pos()));
++                .orElseGet(() -> PlayerSpawnFinder.findSpawn(defaultSpawnLevel, respawnData.pos()));
 +            // Paper end - move logic in Entity to here, to use bukkit supplied world UUID & reset to main world spawn if no valid world is found
              Vec2 spawnAngle = loadedPosition.rotation().orElse(new Vec2(respawnData.yaw(), respawnData.pitch()));
-             this.state = new PrepareSpawnTask.Preparing(spawnLevel, spawnPosition, spawnAngle);
+-            this.state = new PrepareSpawnTask.Preparing(spawnLevel, spawnPosition, spawnAngle);
++            // Shardingbase start - preload the peer-owned absolute handoff destination
++            try {
++                final java.util.Optional<org.bukkit.Location> handoffDestination = this.server.server
++                    .shardingbaseRuntime().playerSpawnDestination(this.shardingbasePlayerState.join());
++                if (handoffDestination.isPresent()) {
++                    final org.bukkit.Location destination = handoffDestination.orElseThrow();
++                    selectedSpawnLevel = ((org.bukkit.craftbukkit.CraftWorld) destination.getWorld()).getHandle();
++                    spawnPosition = CompletableFuture.completedFuture(org.bukkit.craftbukkit.util.CraftLocation.toVec3(destination));
++                    spawnAngle = new Vec2(destination.getYaw(), destination.getPitch());
++                }
++            } catch (final java.io.IOException exception) {
++                LOGGER.warn("Unable to resolve staged Shardingbase destination for {}", this.nameAndId.id(), exception);
++                this.listener.disconnect(net.minecraft.network.chat.Component.literal(
++                    "Shardingbase could not prepare the managed transfer destination. Please reconnect."
++                ));
++                this.close();
++                return;
++            }
++            // Shardingbase end
++            this.state = new PrepareSpawnTask.Preparing(selectedSpawnLevel, spawnPosition, spawnAngle);
+         }
+     }
+
+@@ -97,6 +_,7 @@
+     }
+
+     public void close() {
++        this.shardingbaseClosed = true; // Shardingbase - reject late staging completion
+         if (this.state instanceof PrepareSpawnTask.Preparing preparing) {
+             preparing.cancel();
          }
 @@ -110,10 +_,11 @@
      }
- 
+
      private final class Preparing implements PrepareSpawnTask.State {
 -        private final ServerLevel spawnLevel;
 -        private final CompletableFuture<Vec3> spawnPosition;
@@ -111,10 +156,10 @@
          private @Nullable CompletableFuture<?> chunkLoadFuture;
 +        private @Nullable CompletableFuture<org.bukkit.Location> eventFuture; // Paper
          private final ChunkLoadCounter chunkLoadCounter = new ChunkLoadCounter();
- 
+
          private Preparing(final ServerLevel spawnLevel, final CompletableFuture<Vec3> spawnPosition, final Vec2 spawnAngle) {
-@@ -133,6 +_,54 @@
- 
+@@ -133,6 +_,65 @@
+
              Vec3 spawnPosition = this.spawnPosition.join();
              if (this.chunkLoadFuture == null) {
 +                // Paper start - PlayerSpawnLocationEvent
@@ -165,6 +210,17 @@
 +                    this.spawnAngle = new Vec2(location.getYaw(), location.getPitch());
 +                }
 +                // Paper end - PlayerSpawnLocationEvent
++                final org.bukkit.Location shardingbaseFinalSpawn = org.bukkit.craftbukkit.util.CraftLocation.toBukkit(
++                    spawnPosition, this.spawnLevel, this.spawnAngle.x, this.spawnAngle.y
++                );
++                if (!PrepareSpawnTask.this.server.server.shardingbaseRuntime()
++                    .isPlayerTeleportLocallyOwned(shardingbaseFinalSpawn)) {
++                    PrepareSpawnTask.this.listener.disconnect(net.minecraft.network.chat.Component.literal(
++                        "Shardingbase rejected a spawn location owned by another shard. Please reconnect through the proxy."
++                    ));
++                    PrepareSpawnTask.this.close();
++                    return null;
++                }
                  ChunkPos spawnChunk = ChunkPos.containing(BlockPos.containing(spawnPosition));
                  this.chunkLoadCounter
                      .track(
@@ -175,10 +231,10 @@
 +            if (!PrepareSpawnTask.this.shardingbasePlayerState.isDone()) { // Shardingbase - wait for staged state
 +                return null;
 +            }
- 
+
              PrepareSpawnTask.this.loadListener.finish(LevelLoadListener.Stage.LOAD_PLAYER_CHUNKS);
              return PrepareSpawnTask.this.new Ready(this.spawnLevel, spawnPosition, this.spawnAngle);
-@@ -172,14 +_,58 @@
+@@ -172,15 +_,77 @@
          public ServerPlayer spawn(final Connection connection, final CommonListenerCookie cookie) {
              ChunkPos spawnChunk = ChunkPos.containing(BlockPos.containing(this.spawnPosition));
              this.spawnLevel.waitForEntities(spawnChunk, 3);
@@ -197,7 +253,7 @@
 +            }
 +            // Paper end - configuration api - possibly use legacy saved server player instance
 +            PrepareSpawnTask.this.listener.paperConnection.applyPendingEntityId(player); // Paper - internal entity id api - possibly override player network id if plugins used internal API to configure it.
- 
+
              try (ProblemReporter.ScopedCollector reporter = new ProblemReporter.ScopedCollector(player.problemPath(), PrepareSpawnTask.LOGGER)) {
                  Optional<ValueInput> input = PrepareSpawnTask.this.server
                      .getPlayerList()
@@ -215,14 +271,23 @@
 +                    // CraftBukkit end
                      .map(tag -> TagValueInput.create(reporter, PrepareSpawnTask.this.server.registryAccess(), tag));
                  input.ifPresent(player::load);
+-                player.snapTo(this.spawnPosition, this.spawnAngle.x, this.spawnAngle.y);
 +                // Shardingbase start - merge portable state before join events and initial inventory packets
++                org.bukkit.Location shardingbaseDestination = null;
 +                try {
-+                    PrepareSpawnTask.this.server.server.shardingbaseRuntime().applyPlayerState(
++                    shardingbaseDestination = PrepareSpawnTask.this.server.server.shardingbaseRuntime().applyPlayerState(
 +                        player.getBukkitEntity(),
-+                        PrepareSpawnTask.this.shardingbasePlayerState.join()
-+                    );
++                        PrepareSpawnTask.this.shardingbasePlayerState.join(),
++                        org.bukkit.craftbukkit.util.CraftLocation.toBukkit(
++                            this.spawnPosition, this.spawnLevel, this.spawnAngle.x, this.spawnAngle.y
++                        )
++                    ).orElse(null);
 +                } catch (final java.io.IOException exception) {
 +                    PrepareSpawnTask.LOGGER.warn("Unable to apply staged Shardingbase player state for {}", player.getUUID(), exception);
++                    PrepareSpawnTask.this.listener.disconnect(net.minecraft.network.chat.Component.literal(
++                        "Shardingbase could not apply the managed transfer state. Please reconnect."
++                    ));
++                    throw new IllegalStateException("Unable to complete Shardingbase player transfer", exception);
 +                }
 +                // Shardingbase end
 +                // CraftBukkit start - Better rename detection
@@ -235,6 +300,17 @@
 +                    player.spawnReason = org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.DEFAULT; // set Player SpawnReason to DEFAULT on first login
 +                }
 +                // Paper end - Entity#getEntitySpawnReason
-                 player.snapTo(this.spawnPosition, this.spawnAngle.x, this.spawnAngle.y);
++                if (shardingbaseDestination == null) {
++                    player.snapTo(this.spawnPosition, this.spawnAngle.x, this.spawnAngle.y);
++                } else {
++                    player.snapTo(
++                        shardingbaseDestination.getX(),
++                        shardingbaseDestination.getY(),
++                        shardingbaseDestination.getZ(),
++                        shardingbaseDestination.getYaw(),
++                        shardingbaseDestination.getPitch()
++                    );
++                }
                  PrepareSpawnTask.this.server.getPlayerList().placeNewPlayer(connection, player, cookie);
                  input.ifPresent(tag -> {
+                     player.loadAndSpawnEnderPearls(tag);

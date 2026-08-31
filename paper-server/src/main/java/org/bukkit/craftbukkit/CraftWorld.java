@@ -366,10 +366,35 @@ public class CraftWorld extends CraftRegionAccessor implements World {
             }
         }
     }
+
+    private void requireLocalChunk(final String operation, final int chunkX, final int chunkZ) {
+        if (this.isLocalChunk(chunkX, chunkZ)) {
+            return;
+        }
+        final Plugin plugin = io.papermc.paper.util.StackWalkerUtil.getFirstPluginCaller();
+        this.server.shardingbaseRuntime().requireLocalChunk(
+            this.getKey().toString(),
+            this.getUID(),
+            chunkX,
+            chunkZ,
+            operation,
+            plugin == null ? "server API" : "plugin " + plugin.getName()
+        );
+    }
+
+    private boolean isLocalChunk(final int chunkX, final int chunkZ) {
+        return this.server.shardingbaseRuntime().isChunkLocallyOwned(
+            this.getKey().toString(),
+            this.getUID(),
+            chunkX,
+            chunkZ
+        );
+    }
     // Paper end
 
     @Override
     public Chunk getChunkAt(int x, int z) {
+        this.requireLocalChunk("synchronous chunk load", x, z);
         warnUnsafeChunk("getting a faraway chunk", x, z); // Paper
         net.minecraft.world.level.chunk.LevelChunk chunk = (net.minecraft.world.level.chunk.LevelChunk) this.world.getChunk(x, z, ChunkStatus.FULL, true);
         return new CraftChunk(chunk);
@@ -394,11 +419,14 @@ public class CraftWorld extends CraftRegionAccessor implements World {
 
     @Override
     public boolean isChunkLoaded(int x, int z) {
-        return this.world.getChunkSource().isChunkLoaded(x, z);
+        return this.isLocalChunk(x, z) && this.world.getChunkSource().isChunkLoaded(x, z);
     }
 
     @Override
     public boolean isChunkGenerated(int x, int z) {
+        if (!this.isLocalChunk(x, z)) {
+            return false;
+        }
         // Paper start - Fix this method
         if (!Bukkit.isPrimaryThread()) {
             return java.util.concurrent.CompletableFuture.supplyAsync(() -> {
@@ -526,6 +554,7 @@ public class CraftWorld extends CraftRegionAccessor implements World {
     @Override
     public boolean loadChunk(int x, int z, boolean generate) {
         org.spigotmc.AsyncCatcher.catchOp("chunk load"); // Spigot
+        this.requireLocalChunk(generate ? "chunk generation" : "chunk load", x, z);
         warnUnsafeChunk("loading a faraway chunk", x, z); // Paper
         ChunkAccess chunk = this.world.getChunkSource().getChunk(x, z, generate || isChunkGenerated(x, z) ? ChunkStatus.FULL : ChunkStatus.EMPTY, true); // Paper
 
@@ -562,6 +591,7 @@ public class CraftWorld extends CraftRegionAccessor implements World {
         warnUnsafeChunk("adding a faraway chunk ticket", x, z); // Paper
         Preconditions.checkArgument(plugin != null, "null plugin");
         Preconditions.checkArgument(plugin.isEnabled(), "plugin is not enabled");
+        this.requireLocalChunk("plugin chunk ticket", x, z);
 
         final DistanceManager distanceManager = this.world.getChunkSource().chunkMap.getDistanceManager();
         if (distanceManager.ticketStorage.addPluginRegionTicket(new ChunkPos(x, z), plugin)) {
@@ -625,6 +655,9 @@ public class CraftWorld extends CraftRegionAccessor implements World {
     @Override
     public void setChunkForceLoaded(int x, int z, boolean forced) {
         warnUnsafeChunk("forceloading a faraway chunk", x, z); // Paper
+        if (forced) {
+            this.requireLocalChunk("forced chunk ticket", x, z);
+        }
         this.getHandle().setChunkForced(x, z, forced);
     }
 
@@ -1999,6 +2032,7 @@ public class CraftWorld extends CraftRegionAccessor implements World {
     // Paper start
     @Override
     public void getChunkAtAsync(int x, int z, boolean gen, boolean urgent, @NotNull Consumer<? super Chunk> cb) {
+        this.requireLocalChunk(gen ? "asynchronous chunk generation" : "asynchronous chunk load", x, z);
         warnUnsafeChunk("getting a faraway chunk async", x, z); // Paper
         ca.spottedleaf.moonrise.common.PlatformHooks.get().scheduleChunkLoad(
             this.getHandle(), x, z, gen, ChunkStatus.FULL, true,
@@ -2012,6 +2046,8 @@ public class CraftWorld extends CraftRegionAccessor implements World {
 
     @Override
     public void getChunksAtAsync(int minX, int minZ, int maxX, int maxZ, boolean urgent, Runnable cb) {
+        this.requireLocalChunk("asynchronous area load", minX, minZ);
+        this.requireLocalChunk("asynchronous area load", maxX, maxZ);
         warnUnsafeChunk("getting a faraway chunk async", minX, minZ); // Paper
         warnUnsafeChunk("getting a faraway chunk async", maxX, maxZ); // Paper
         this.getHandle().loadChunks(

@@ -71,12 +71,12 @@ fun optionalInclude(name: String, op: (ProjectDescriptor.() -> Unit)? = null) {
 gradle.lifecycle.beforeProject {
     val mcVersion = providers.gradleProperty("mcVersion").get().trim()
     val paperVersionChannel = providers.gradleProperty("channel").get().trim()
-    val paperBuildNumber = providers.environmentVariable("BUILD_NUMBER").orNull?.trim()?.toInt()
-    val versionString = if (paperBuildNumber == null) {
-        "$mcVersion.local-SNAPSHOT"
-    } else {
-        "$mcVersion.build.$paperBuildNumber-${paperVersionChannel.lowercase()}"
-    }
+    // Bukkit.getBukkitVersion() is an API compatibility identifier, not the
+    // Shardingbase build number. Keep it byte-for-byte compatible with the
+    // upstream Paper build this fork tracks so plugins do not mistake a local
+    // fork build for an unknown Minecraft/API version.
+    val paperCompatibilityBuild = providers.gradleProperty("paperCompatibilityBuild").get().trim().toInt()
+    val versionString = "$mcVersion.build.$paperCompatibilityBuild-${paperVersionChannel.lowercase()}"
     version = versionString
 }
 

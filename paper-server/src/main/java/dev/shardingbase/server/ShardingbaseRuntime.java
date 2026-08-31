@@ -58,6 +58,8 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     private final AtomicReference<ShardManifestRegistry> shardManifests;
     private final AtomicLong generation = new AtomicLong();
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> chunkDiagnostics =
+        new java.util.concurrent.ConcurrentHashMap<>();
     private final PlayerStateCoordinator playerStateCoordinator;
     private final ShardBoundaryCoordinator shardBoundaryCoordinator;
     private final RemoteOperationCoordinator remoteOperationCoordinator;
@@ -113,6 +115,7 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         this.playerStateCoordinator = new PlayerStateCoordinator(
             configuration.identity().serverId(),
             serverDirectory,
+            this::isPlayerTeleportLocallyOwned,
             logger
         );
         this.shardBoundaryCoordinator = new ShardBoundaryCoordinator(
@@ -126,9 +129,9 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         );
         this.remoteOperationCoordinator = new RemoteOperationCoordinator(configuration.identity().serverId(), logger);
         this.remoteCommandCoordinator = new RemoteCommandCoordinator(configuration.identity().serverId(), logger);
-        this.worldMapCoordinator = new WorldMapCoordinator(configuration.identity().serverId(), logger);
+        this.worldMapCoordinator = new WorldMapCoordinator(configuration.identity().serverId(), serverDirectory, logger);
         this.worldTransactionCoordinator =
-            new WorldTransactionCoordinator(configuration.identity().serverId(), logger);
+            new WorldTransactionCoordinator(configuration.identity().serverId(), serverDirectory, logger);
         this.remoteOperations = new RoutedRemoteOperations();
         this.snapshot = new AtomicReference<>(new Snapshot(
             configuration.identity(),
@@ -169,6 +172,75 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
     @Override
     public RemoteOperations remoteOperations() {
         return this.remoteOperations;
+    }
+
+    /** Returns whether a chunk may be loaded, generated, ticketed, ticked, or sent by this shard. */
+    public boolean isChunkLocallyOwned(
+        final String worldKey,
+        final UUID worldId,
+        final int chunkX,
+        final int chunkZ
+    ) {
+        final ShardManifestRegistry.Boundary boundary = this.shardManifests.get().boundary(worldKey).orElse(null);
+        if (boundary == null) {
+            return true;
+        }
+        if (!boundary.worldId().equals(worldId)) {
+            this.lockShardOwnership("world identity mismatch for " + worldKey + ": manifest "
+                + boundary.worldId() + ", loaded " + worldId);
+            return false;
+        }
+        final boolean negative = (boundary.axis() == ShardManifestRegistry.Axis.X ? chunkX : chunkZ)
+            < boundary.cutChunk();
+        return negative == (boundary.ownedSide() == ShardManifestRegistry.Side.NEGATIVE);
+    }
+
+    /** Returns whether a player teleport target is owned by this backend. */
+    public boolean isPlayerTeleportLocallyOwned(final org.bukkit.Location target) {
+        Objects.requireNonNull(target, "target");
+        final org.bukkit.World world = Objects.requireNonNull(target.getWorld(), "target world");
+        return this.isChunkLocallyOwned(
+            world.getKey().toString(),
+            world.getUID(),
+            target.getBlockX() >> 4,
+            target.getBlockZ() >> 4
+        );
+    }
+
+    /**
+     * Converts an ordinary Paper player teleport into a managed peer handoff when its
+     * final event destination belongs to the other shard.
+     */
+    public PlayerTeleportRouting routePlayerTeleport(
+        final org.bukkit.entity.Player player,
+        final org.bukkit.Location target
+    ) {
+        Objects.requireNonNull(player, "player");
+        Objects.requireNonNull(target, "target");
+        return this.shardBoundaryCoordinator.routeTeleport(player, target);
+    }
+
+    /** Fails an explicit server API request before it can force-load an unowned chunk. */
+    public void requireLocalChunk(
+        final String worldKey,
+        final UUID worldId,
+        final int chunkX,
+        final int chunkZ,
+        final String operation,
+        final String caller
+    ) {
+        if (this.isChunkLocallyOwned(worldKey, worldId, chunkX, chunkZ)) {
+            return;
+        }
+        final String detail = "Shardingbase rejected " + operation + " by " + caller + " for unowned chunk "
+            + worldKey + " [" + chunkX + ',' + chunkZ + ']';
+        final long now = System.nanoTime();
+        final String key = caller + '\0' + operation + '\0' + worldKey;
+        final Long previous = this.chunkDiagnostics.put(key, now);
+        if (previous == null || now - previous >= Duration.ofSeconds(10).toNanos()) {
+            this.logger.warning(detail);
+        }
+        throw new IllegalStateException(detail);
     }
 
     @Override
@@ -227,12 +299,20 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
         return this.playerStateCoordinator.fetch(playerId);
     }
 
-    /** Applies a previously fetched state revision on the server thread. */
-    public void applyPlayerState(
-        final org.bukkit.entity.Player player,
+    /** Resolves a staged destination before Paper begins loading player spawn chunks. */
+    public Optional<org.bukkit.Location> playerSpawnDestination(
         final Optional<PlayerHandoffCodec.Stage> fetched
     ) throws java.io.IOException {
-        this.playerStateCoordinator.applyIfNew(player, fetched);
+        return this.playerStateCoordinator.spawnDestination(fetched);
+    }
+
+    /** Applies a previously fetched state revision and returns its final pre-join spawn. */
+    public Optional<org.bukkit.Location> applyPlayerState(
+        final org.bukkit.entity.Player player,
+        final Optional<PlayerHandoffCodec.Stage> fetched,
+        final org.bukkit.Location eventDestination
+    ) throws java.io.IOException {
+        return this.playerStateCoordinator.applyIfNew(player, fetched, eventDestination);
     }
 
     /** Captures post-quit state and schedules replication to the currently validated peer. */
@@ -243,6 +323,16 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
             this.playerStateCoordinator.captureAndReplicate(player, peer.serverId());
         }
         this.shardBoundaryCoordinator.disconnected(player.getUniqueId());
+    }
+
+    /** Finalizes a staged player revision after Paper has durably saved its selected state files. */
+    public void finalizePlayerState(
+        final java.util.UUID playerId,
+        final boolean playerSaved,
+        final boolean statsSaved,
+        final boolean advancementsSaved
+    ) {
+        this.playerStateCoordinator.finalizeApplied(playerId, playerSaved, statsSaved, advancementsSaved);
     }
 
     /** Returns whether source-side interaction is frozen for a managed handoff. */
@@ -263,6 +353,15 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
             return CompletableFuture.failedFuture(new IllegalStateException(this.statusDetail()));
         }
         return this.playerStateCoordinator.toggle(categories);
+    }
+
+    /** Queues a one-way portable snapshot for every online player on this backend. */
+    public int synchronizeOnlinePlayers() {
+        final PeerStatus peer = this.peerStatus();
+        if (this.featureState() != FeatureState.ENABLED || !peer.available()) {
+            throw new IllegalStateException("Player synchronization is unavailable: " + this.statusDetail());
+        }
+        return this.playerStateCoordinator.replicateOnlinePlayers(peer.serverId());
     }
 
     private void beginValidation(final ServerIdentity identity) {
@@ -402,6 +501,13 @@ public final class ShardingbaseRuntime implements ShardingbaseService, AutoClose
             Objects.requireNonNull(detail, "detail");
             Objects.requireNonNull(peerStatus, "peerStatus");
         }
+    }
+
+    /** Outcome of evaluating a Paper player teleport against the active shard manifest. */
+    public enum PlayerTeleportRouting {
+        LOCAL,
+        ACCEPTED,
+        REJECTED
     }
 
     private final class RoutedRemoteOperations implements RemoteOperations {

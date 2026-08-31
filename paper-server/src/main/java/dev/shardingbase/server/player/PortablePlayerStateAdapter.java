@@ -133,7 +133,7 @@ public final class PortablePlayerStateAdapter {
                 player.setExhaustion(input.readFloat());
             });
             case POTION_EFFECTS -> applyPotionEffects(player, payload);
-            case GAME_MODE -> decode(payload, input -> player.setGameMode(GameMode.valueOf(readString(input))));
+            case GAME_MODE -> decode(payload, input -> restoreGameMode(player, GameMode.valueOf(readString(input))));
             case ABILITIES -> decode(payload, input -> {
                 final boolean allowFlight = input.readBoolean();
                 final boolean flying = input.readBoolean();
@@ -163,10 +163,8 @@ public final class PortablePlayerStateAdapter {
 
     private static void applyPotionEffects(final Player player, final byte[] payload) throws IOException {
         decode(payload, input -> {
-            for (final PotionEffect effect : List.copyOf(player.getActivePotionEffects())) {
-                player.removePotionEffect(effect.getType());
-            }
             final int count = readCount(input);
+            final List<PotionEffect> restored = new ArrayList<>(count);
             for (int index = 0; index < count; index++) {
                 final NamespacedKey key = NamespacedKey.fromString(readString(input));
                 final PotionEffectType type = key == null ? null : Registry.POTION_EFFECT_TYPE.get(key);
@@ -178,9 +176,31 @@ public final class PortablePlayerStateAdapter {
                 if (type == null) {
                     throw new ProtocolException("Unknown potion effect in player snapshot");
                 }
-                player.addPotionEffect(new PotionEffect(type, duration, amplifier, ambient, particles, icon));
+                restored.add(new PotionEffect(type, duration, amplifier, ambient, particles, icon));
+            }
+            if (player instanceof final org.bukkit.craftbukkit.entity.CraftPlayer craftPlayer) {
+                craftPlayer.getHandle().shardingbaseRestoreEffects(restored.stream()
+                    .map(org.bukkit.craftbukkit.potion.CraftPotionUtil::fromBukkit)
+                    .toList());
+            } else {
+                for (final PotionEffect effect : List.copyOf(player.getActivePotionEffects())) {
+                    player.removePotionEffect(effect.getType());
+                }
+                for (final PotionEffect effect : restored) {
+                    player.addPotionEffect(effect);
+                }
             }
         });
+    }
+
+    private static void restoreGameMode(final Player player, final GameMode gameMode) {
+        if (player instanceof final org.bukkit.craftbukkit.entity.CraftPlayer craftPlayer) {
+            craftPlayer.getHandle().gameMode.shardingbaseRestoreGameMode(
+                net.minecraft.world.level.GameType.byId(gameMode.getValue())
+            );
+        } else {
+            player.setGameMode(gameMode);
+        }
     }
 
     private static byte[] captureAdvancements(final Player player) throws IOException {
@@ -217,6 +237,22 @@ public final class PortablePlayerStateAdapter {
                 desired.put(key, Set.copyOf(criteria));
             }
         });
+        if (player instanceof final org.bukkit.craftbukkit.entity.CraftPlayer craftPlayer) {
+            final Map<net.minecraft.resources.Identifier, Set<String>> restored = new HashMap<>();
+            for (final Map.Entry<String, Set<String>> entry : desired.entrySet()) {
+                final net.minecraft.resources.Identifier identifier =
+                    net.minecraft.resources.Identifier.tryParse(entry.getKey());
+                if (identifier == null) {
+                    throw new ProtocolException("Invalid advancement key in player snapshot");
+                }
+                restored.put(identifier, entry.getValue());
+            }
+            craftPlayer.getHandle().getAdvancements().shardingbaseRestoreProgress(
+                craftPlayer.getHandle().level().getServer().getAdvancements(),
+                restored
+            );
+            return;
+        }
         final Iterator<Advancement> advancements = Bukkit.advancementIterator();
         while (advancements.hasNext()) {
             final Advancement advancement = advancements.next();

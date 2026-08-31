@@ -10,6 +10,7 @@ import dev.shardingbase.protocol.WorldTransactionCodec.Request;
 import dev.shardingbase.protocol.WorldTransactionCodec.Response;
 import dev.shardingbase.server.validation.LocalNodeClient;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -25,6 +26,7 @@ import org.bukkit.World;
 /** Saves and flushes the local server before authorizing its node's offline work. */
 public final class WorldTransactionCoordinator implements AutoCloseable {
     private final String backendId;
+    private final Path serverDirectory;
     private final Logger logger;
     private final LocalNodeClient node = new LocalNodeClient();
     private final ExecutorService io = Executors.newSingleThreadExecutor(task -> Thread.ofPlatform()
@@ -35,8 +37,9 @@ public final class WorldTransactionCoordinator implements AutoCloseable {
     private volatile Executor serverExecutor;
     private volatile Thread pollThread;
 
-    public WorldTransactionCoordinator(final String backendId, final Logger logger) {
+    public WorldTransactionCoordinator(final String backendId, final Path serverDirectory, final Logger logger) {
         this.backendId = backendId;
+        this.serverDirectory = serverDirectory.toAbsolutePath().normalize();
         this.logger = logger;
     }
 
@@ -116,13 +119,20 @@ public final class WorldTransactionCoordinator implements AutoCloseable {
         }
         final NamespacedKey key = NamespacedKey.fromString(manifest.worldKey());
         final World world = key == null ? null : Bukkit.getWorld(key);
+        final Path configuredWorld = this.serverDirectory.resolve(manifest.worldDirectory()).normalize();
+        if (!configuredWorld.startsWith(this.serverDirectory)) {
+            return "world directory escapes the Shardingbase server directory";
+        }
         if (world == null) {
             return this.backendId.equals(manifest.targetBackendId())
                 ? null
                 : "source world is not loaded";
         }
-        if (!world.getWorldFolder().getName().equals(manifest.worldDirectory())) {
+        if (!world.getWorldPath().toAbsolutePath().normalize().equals(configuredWorld)) {
             return "loaded world directory does not match the signed transaction manifest";
+        }
+        if (this.backendId.equals(manifest.targetBackendId())) {
+            return null;
         }
         if (!world.getUID().equals(manifest.worldId())) {
             return "loaded world UUID does not match the signed transaction manifest";

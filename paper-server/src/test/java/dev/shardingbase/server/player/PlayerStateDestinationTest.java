@@ -26,6 +26,18 @@ class PlayerStateDestinationTest {
         assertEquals(-4.0F, safe.getPitch());
     }
 
+    @Test
+    void neverInspectsOrSelectsAnUnownedCandidate() {
+        final World world = worldWithOnlySafeColumn(11, 64, 10);
+        final Location safe = PlayerStateCoordinator.safeDestination(
+            new Location(world, 10.25, 64.0, 10.75),
+            4,
+            candidate -> candidate.getBlockX() <= 10
+        );
+
+        org.junit.jupiter.api.Assertions.assertNull(safe);
+    }
+
     private static World worldWithOnlySafeColumn(final int safeX, final int safeY, final int safeZ) {
         return (World) Proxy.newProxyInstance(
             World.class.getClassLoader(),
