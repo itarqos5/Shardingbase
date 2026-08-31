@@ -97,10 +97,10 @@ tasks.register("printPaperVersion") {
 
 val installShardingbaseManager by tasks.registering {
     group = "build"
-    description = "Install the self-contained Shardingbase node manager in the project root"
+    description = "Install the self-contained Shardingbase server bootstrap in the project root"
     dependsOn(":shardingbase-node:jar")
-    val source = layout.projectDirectory.file("shardingbase-node/build/libs/Shardingbase-Node.jar")
-    val target = layout.projectDirectory.file("Shardingbase.jar")
+    val source = layout.projectDirectory.file("shardingbase-node/build/libs/server.jar")
+    val target = layout.projectDirectory.file("server.jar")
     inputs.file(source)
     outputs.file(target)
     doLast {
@@ -114,7 +114,7 @@ val installShardingbaseManager by tasks.registering {
 
 val assembleShardingbaseRelease by tasks.registering(Sync::class) {
     group = "build"
-    description = "Assemble the Shardingbase server, Velocity, and node test artifacts"
+    description = "Assemble the two deployable Shardingbase artifacts"
     dependsOn(
         ":paper-server:createShardingbaseJar",
         ":shardingbase-velocity:jar",
@@ -122,11 +122,8 @@ val assembleShardingbaseRelease by tasks.registering(Sync::class) {
         installShardingbaseManager,
     )
     into(layout.buildDirectory.dir("release"))
-    from(layout.projectDirectory.file("paper-server/build/libs/Shardingbase.jar")) {
-        rename { "Shardingbase-server.jar" }
-    }
-    from(layout.projectDirectory.file("shardingbase-velocity/build/libs/Shardingbase-Velocity.jar"))
-    from(layout.projectDirectory.file("shardingbase-node/build/libs/Shardingbase-Node.jar"))
+    from(layout.projectDirectory.file("shardingbase-velocity/build/libs/shardingbase-velocity.jar"))
+    from(layout.projectDirectory.file("shardingbase-node/build/libs/server.jar"))
 }
 
 tasks.register("buildShardingbaseCompatibilityFixtures") {

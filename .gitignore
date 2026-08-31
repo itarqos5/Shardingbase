@@ -2,6 +2,10 @@
 build/
 /Shardingbase.jar
 /Shardingbase-backend.jar
+/server.jar
+/tests/cache/
+/tests/results/
+/tests/runtime/
 
 # Eclipse stuff
 .classpath

@@ -1,0 +1,91 @@
+{
+  "plugins": [
+    {
+      "name": "LuckPerms",
+      "file": "LuckPerms-Bukkit-5.5.71.jar",
+      "url": "https://cdn.modrinth.com/data/Vebnzrzj/versions/b0mk8uS6/LuckPerms-Bukkit-5.5.71.jar",
+      "sha512": "188a91f0a543d23bfda32385fca6db63d61e49c8a422bd452a260bd9cbc6a7d7fe45071199e9fca8f3ce43c2b41ee84fd315bd15464577028ff3951a7d4fab27",
+      "profiles": ["core", "worldedit", "fawe"]
+    },
+    {
+      "name": "HuskHomes",
+      "file": "HuskHomes-Paper-4.11-7a2d09a.jar",
+      "url": "https://cdn.modrinth.com/data/J6U9o3JG/versions/vakwhfYQ/HuskHomes-Paper-4.11-7a2d09a.jar",
+      "sha512": "b915a474f8db244a3273583e03d1609dce792100b8a155a69297ff87637d3f857550520de7347c7ed799f21a295cc4b62a1cb2a8e4990e49a5052f8cc22a7ce1",
+      "profiles": ["core", "worldedit", "fawe"]
+    },
+    {
+      "name": "ViaVersion",
+      "file": "ViaVersion-5.12.0-SNAPSHOT.jar",
+      "url": "https://cdn.modrinth.com/data/P1OZGk5p/versions/k63Gp33W/ViaVersion-5.12.0-SNAPSHOT.jar",
+      "sha512": "0285abe0674bcf16462f0b09f5615813579c2b83ecbbb4fe3373e0f5375c974da87440cdfd5416cfd727151ade86e80c41d1041d2843c70bbe5978115baa4ae6",
+      "profiles": ["core", "worldedit", "fawe"]
+    },
+    {
+      "name": "ViaBackwards",
+      "file": "ViaBackwards-5.12.0-SNAPSHOT.jar",
+      "url": "https://cdn.modrinth.com/data/NpvuJQoq/versions/qgpLZEQh/ViaBackwards-5.12.0-SNAPSHOT.jar",
+      "sha512": "97c908a2ece79ae9ee153919c0697aaf4b5b0f7e9b62d4d4c8000452f298f6fc145cbe32b75642106c4aa2aee32a329b6c011753676bb8342577b2fd4d6fa41d",
+      "profiles": ["core", "worldedit", "fawe"]
+    },
+    {
+      "name": "PlaceholderAPI",
+      "file": "PlaceholderAPI-2.12.3.jar",
+      "url": "https://cdn.modrinth.com/data/lKEzGugV/versions/pIvQcXW8/PlaceholderAPI-2.12.3.jar",
+      "sha512": "f048d55b633fd816c08e2e4472bd54a75fc4d13534682e6e7745408253d2f393706efdc389d12ca2cf28d4dc035a9afdda3eed9ecde51c7e332831391d9b6479",
+      "profiles": ["core", "worldedit", "fawe"]
+    },
+    {
+      "name": "VaultUnlocked",
+      "logName": "Vault",
+      "file": "VaultUnlocked-2.20.2.jar",
+      "url": "https://cdn.modrinth.com/data/ayRaM8J7/versions/cLNipSgw/VaultUnlocked-2.20.2.jar",
+      "sha512": "9c5baefbe23ede10d00af580fc9d5d6da9a9baac40feef078bb951448b89df039131299bd5d3fe8ccd947367de8fe24b543dc9cce83fbf1687a3221baca8da8e",
+      "profiles": ["core", "worldedit", "fawe"]
+    },
+    {
+      "name": "Multiverse-Core",
+      "file": "multiverse-core-5.8.1.jar",
+      "url": "https://cdn.modrinth.com/data/3wmN97b8/versions/YZ2Ji4IS/multiverse-core-5.8.1.jar",
+      "sha512": "322c1f4dc1abcd30e0f55aa9f378c7031846d1e59a5156480f9199050dc104c19468c9891c47be35e4dde68742ec4420ea974ec8850db6a259f97ffa1b1c51ea",
+      "profiles": ["core", "worldedit", "fawe"]
+    },
+    {
+      "name": "CoreProtect",
+      "expectedUnsupported": true,
+      "file": "CoreProtect-CE-24.0.jar",
+      "url": "https://cdn.modrinth.com/data/Lu3KuzdV/versions/Kma0kBsY/CoreProtect-CE-24.0.jar",
+      "sha512": "f95476394d0ec11ad857e0b1b3e53b23b65192ec09a7a7faaecb6b8f970419e7310c9077868c24a87228ffed5fa22db5fb3c946e2c30c450bcfa92360e700d9b",
+      "profiles": ["core", "worldedit", "fawe"]
+    },
+    {
+      "name": "EssentialsX",
+      "logName": "Essentials",
+      "file": "EssentialsX-2.22.1-dev.jar",
+      "url": "https://repo.essentialsx.net/snapshots/net/essentialsx/EssentialsX/2.22.1-SNAPSHOT/EssentialsX-2.22.1-20260829.175939-22.jar",
+      "sha512": "75769b75978379bffc25f46c9ebbc040cf0b3630492ea73e3b0d91e6d26a30ecc36ab6d804b37d25f0530a7f5f9f6acdf8a119ff0fda6423004833d1c4ec36fe",
+      "profiles": ["core", "worldedit", "fawe"]
+    },
+    {
+      "name": "WorldEdit",
+      "file": "worldedit-bukkit-7.4.5.jar",
+      "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/F5ea2ov3/worldedit-bukkit-7.4.5.jar",
+      "sha512": "a383492fac6bfb4d43a257dfa7b5fc076aae503a71151b463de4fe80e6f3d5fc11209eaf4097baa115f3febf0adc40ca0a1ecda227b8439b429d0a4ba3a63a4f",
+      "profiles": ["worldedit"]
+    },
+    {
+      "name": "FastAsyncWorldEdit",
+      "file": "FastAsyncWorldEdit-Paper-2.15.4.jar",
+      "url": "https://cdn.modrinth.com/data/z4HZZnLr/versions/5TOYHuQr/FastAsyncWorldEdit-Paper-2.15.4.jar",
+      "sha512": "f623a5729aed386c5aec0cc5a51f01a6362d452b020851bd8e17bb9df66b9abaa217b07a4fbf3ee084ddea202824843390e02486f6eea5640624e6ab6bcc81b8",
+      "profiles": ["fawe"]
+    },
+    {
+      "name": "WorldGuard",
+      "file": "worldguard-bukkit-7.0.18.jar",
+      "url": "https://cdn.modrinth.com/data/DKY9btbd/versions/btHBavWa/worldguard-bukkit-7.0.18.jar",
+      "sha512": "9404a0eacebc5c85bdcf4a7d343330b4894dcd87246548adca75c43dbf2a3c0539f75bb15665cdd04d7f980e8d0d2a95d79e96861ba74fcd5636d685496f47f2",
+      "profiles": ["worldedit", "fawe"]
+    }
+  ]
+}

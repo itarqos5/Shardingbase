@@ -3,154 +3,104 @@
 [![Build status](https://img.shields.io/github/actions/workflow/status/itarqos5/Shardingbase/build.yml?branch=feature%2Fshardingbase-prototype&label=build)](https://github.com/itarqos5/Shardingbase/actions)
 [![Upstream](https://img.shields.io/badge/upstream-Paper-344ceb)](https://github.com/PaperMC/Paper)
 
-Shardingbase is an experimental Paper 26.2 fork for one Velocity proxy and
-exactly two backend servers. It keeps the Bukkit, Spigot, and Paper plugin
-loaders and public API packages intact for ordinary local-server behavior, then
-adds explicit shard identity, authenticated coordination, and an asynchronous
-`dev.shardingbase.api` contract.
+Shardingbase is an experimental Paper 26.2 fork for exactly two backend servers behind one Velocity proxy. It preserves ordinary Paper behavior on each backend and adds authenticated coordination, portable player-state transfer, coordinate-preserving shard crossing, remote operations, map planning, and an offline world-cut transaction.
 
-This branch is a working prototype, not production-ready distributed storage.
-Never test a world cut against the only copy of a world. Features described as
-prototype-only below are deliberately reported as unavailable instead of
-pretending that remote Bukkit objects exist.
+This branch is a working prototype, not a production storage system. Always keep an independent world backup and test the complete cut, rollback, and plugin set before using real player data.
 
-## Artifacts
+## Paper plugin compatibility
 
-Build with JDK 25:
+Shardingbase retains the Bukkit, Spigot, Paper, and legacy plugin loaders and the `org.bukkit` and `io.papermc.paper` APIs. It advertises the exact upstream Paper 26.2 build 121 API identity (`26.2.build.121-stable`) and Paper compatibility build/commit data to plugins that perform version checks. The visible server brand remains Shardingbase; compatibility calls which incorrectly gate on `Bukkit.getName()` receive `Paper`.
 
-```bash
-./gradlew assembleShardingbaseRelease
+No fork can guarantee every third-party plugin. Shardingbase avoids fake remote Bukkit objects: a plugin still sees the worlds, chunks, entities, and players loaded by its current backend. Normal local plugin behavior remains Paper-compatible, while explicit remote work uses `dev.shardingbase.api`.
+
+The included runtime matrix currently starts and enables these real public builds together:
+
+- LuckPerms, HuskHomes, EssentialsX, PlaceholderAPI, and VaultUnlocked;
+- ViaVersion and ViaBackwards;
+- Multiverse-Core;
+- WorldEdit with WorldGuard;
+- FastAsyncWorldEdit with WorldGuard.
+
+The public CoreProtect Community Edition artifact is also exercised, but is recorded as an expected upstream incompatibility because that public build rejects Minecraft 26.2. The matrix does not hide its disable message or label it a Shardingbase pass.
+
+FastAsyncWorldEdit is detected by JAR content, including renamed JARs. Only when FAWE is installed does the supervisor select FAWE's Paper 26.2 adapter. Plain WorldEdit uses its normal Paperweight adapter.
+
+## Global coordinates and homes
+
+Shards do not rebase coordinates. Cuts are aligned to chunk boundaries, and the world retains one absolute coordinate system on both servers. For example, a requested split near X `25,000` uses the aligned cut at X `24,992`:
+
+- shard A owns blocks through `24,991`;
+- shard B begins at block `24,992`;
+- a player crossing arrives on shard B at the same X/Y/Z, yaw, pitch, world key, and world UUID;
+- plugins on shard B read X `25,000`, not X `0`.
+
+Ordinary Paper `Player#teleport` and `teleportAsync` calls are routed through the managed Velocity handoff when their final `PlayerTeleportEvent` destination belongs to the peer. The target is staged before spawn-chunk loading; portable state is applied before join packets/events, and an unsafe exact block is adjusted only within a bounded four-block search.
+
+A homes plugin must still make the saved home visible to both servers. For HuskHomes, install the same version on both backends and configure both copies with:
+
+```yaml
+database:
+  type: MARIADB # MYSQL or POSTGRESQL also works
+  credentials:
+    host: database.internal
+    port: 3306
+    database: huskhomes
+    username: huskhomes
+    password: replace-me
+
+cross_server:
+  enabled: true
+  cluster_id: main
+  broker_type: PLUGIN_MESSAGE # or REDIS
 ```
 
-Windows PowerShell:
+Both backends must use the same database, cluster ID, and broker configuration. Keep the HuskHomes server identity/Velocity configuration distinct as required by HuskHomes. With that setup, the plugin can find a home saved on the other shard and Shardingbase preserves its absolute destination coordinates. Other homes plugins need an equivalent shared database or supported cross-server mode; two independent SQLite files cannot share home records.
+
+## Build artifacts
+
+Build with JDK 25:
 
 ```powershell
 .\gradlew.bat assembleShardingbaseRelease
 ```
 
-The task writes these files to `build/release/`:
+Only two distributable files are written to `build/release/`:
 
-- `Shardingbase.jar` — the standalone Paper-compatible backend.
-- `Shardingbase-Velocity.jar` — the Velocity 4.1 controller plugin.
-- `Shardingbase-Node.jar` — the backend parent process, containing an embedded
-  copy of the backend.
+- `server.jar` — the backend supervisor with the Paper-compatible Shardingbase backend embedded as a jar-in-jar;
+- `shardingbase-velocity.jar` — the Velocity 4.1 controller plugin.
 
-The root `Shardingbase.jar` is also the standalone backend. The node remains a
-separate, clearly named artifact.
+`server.jar` exports the embedded backend to `cache/backend.jar`. On every launch it byte-compares the embedded and cached copies, then atomically extracts or replaces a missing/outdated file. Uploading only `server.jar` is sufficient for a backend.
 
-## Installation
+## Backend installation
 
-### Bare metal
-
-For a normal backend without node supervision:
+Place `server.jar` in an otherwise normal Paper server directory:
 
 ```bash
-java -Xms128M -Xmx4G -jar Shardingbase.jar nogui
+java -Xms64M -Xmx128M -jar server.jar nogui
 ```
 
-Shardingbase still runs as a Paper-compatible server when the controller is
-absent, but distributed features enter `DISABLED`.
+The parent heap belongs to the lightweight supervisor. Set `SHARDINGBASE_BACKEND_MEMORY_MB` for the child Minecraft heap; for example `4096` gives the backend `-Xms128M -Xmx4096M`. Minecraft arguments after the JAR are forwarded unchanged.
 
-For a managed backend, place only `Shardingbase-Node.jar` in an otherwise empty
-backend directory and run:
-
-```bash
-java -Xms128M -Xmx4G -jar Shardingbase-Node.jar nogui
-```
-
-The node exports its embedded server as `Shardingbase-backend.jar`, starts it in
-a child JVM, shares the console, forwards Minecraft arguments, and propagates a
-non-zero child exit. Set `SHARDINGBASE_BACKEND_JAR` to another plain `.jar`
-filename if required. Set `SHARDINGBASE_BACKEND_MEMORY_MB` when the node itself
-has a small bounded heap; the child then receives `-Xms128M` and the configured
-`-Xmx` instead of inheriting the node heap.
-
-Install `Shardingbase-Velocity.jar` in `velocity/plugins/`, start Velocity once,
-and inspect `plugins/shardingbase/config.yml`. The plugin generates exactly two
-node credentials, a PKCS12 TLS key, a certificate fingerprint in the proxy log,
-and `shardingbase.db`.
-
-### Pterodactyl
-
-Import `distribution/pterodactyl/egg-shardingbase-node.json`, select its Java 25
-image, then upload `Shardingbase-Node.jar`. The default jar filename is already
-correct. Configure:
-
-- `NODE_MEMORY` for the parent (128 MiB by default).
-- `SHARDINGBASE_BACKEND_MEMORY_MB` for the Minecraft child.
-- `SHARDINGBASE_CONTROLLER_URI`, such as `tls://proxy.example.net:8443`.
-- `SHARDINGBASE_CERTIFICATE_SHA256`, copied from the Velocity startup log.
-- `SHARDINGBASE_NODE_ID` and its matching `SHARDINGBASE_NODE_CREDENTIAL`.
-- the backup root and retention policy before enabling world transactions.
-
-The panel allocation must cover backend heap, node heap, direct/native memory,
-and operating overhead. The Velocity control listener needs a separate reachable
-allocation in addition to the normal Minecraft proxy port.
-
-## Backend configuration and states
-
-Before plugins load, each backend creates `config/shardingbase.yml` containing
-exactly:
+On first backend startup, `config/shardingbase.yml` is created:
 
 ```yaml
 server-id: "generated-unique-id"
 server-name: "velocity-server-name"
 ```
 
-`server-name` must exactly match a Velocity `servers` entry. Each backend needs
-a unique non-empty `server-id`. A new file uses a generated UUID and
-`change-me`; edit that name and run `/shardingbase reload` or restart.
+Use a unique non-empty `server-id` on each backend. `server-name` must exactly match one of Velocity's registered server names. A wrong but valid name leaves normal Paper online while distributed features stay disabled. Ambiguous/unsafe configuration fails clearly instead of being guessed.
 
-Missing IDs and scalar type mistakes are repaired with a timestamped backup and
-atomic replacement. Duplicate keys, unreadable YAML, structured values, or an
-unsafe write fail startup clearly. A valid but unknown server name leaves normal
-Paper operation online with Shardingbase `DISABLED`.
+The supervisor handles normal `stop`, panel termination, and Ctrl+C. A normal backend stop ends the supervisor so process managers see a clean shutdown. During an authorized world transaction, the supervisor remains alive while the child is stopped, performs the offline work, and accepts the coordinated restart.
 
-Feature states are:
+## Velocity installation
 
-- `PENDING` while validation is outstanding.
-- `ENABLED` only after both authenticated backends have matching protocol,
-  Minecraft, and Shardingbase versions.
-- `DISABLED` when validation fails or times out; retries use capped backoff.
-- `MAINTENANCE` for a registered shard that cannot safely accept players.
+Put `shardingbase-velocity.jar` in `velocity/plugins/` and start Velocity once. The plugin creates:
 
-A committed world contains `shardingbase-shard.properties` with the transaction
-ID, world key, X/Z axis, chunk cut, owned half, peer ID, and format version. The
-backend validates these strict manifests before plugin loading. The public
-ownership API then returns `LOCAL` or `REMOTE` by block position, including
-negative coordinates. If controller validation is unavailable while any manifest
-exists, the backend enters `MAINTENANCE` instead of silently disabling ownership.
+- `plugins/shardingbase/config.yml`;
+- `plugins/shardingbase/tls.p12`;
+- `plugins/shardingbase/shardingbase.db`.
 
-Operator commands and permissions (all operator-only by default):
-
-- `/shardingbase` — identity, version, feature state, proxy, peer, and help.
-- `/shardingbase reload` — reload only identity/menu configuration and revalidate.
-- `/shardingbase sync` — open the player-only management GUI.
-- `shardingbase.admin`, `shardingbase.reload`, and `shardingbase.sync`.
-
-## Menus
-
-Validated menu files are created under `config/shardingbase_menus/`:
-
-- `main.yml`
-- `player-data.yml`
-- `confirmation.yml`
-- `world-sharding.yml`
-
-Titles, row counts, materials, slots, display names, lore, and enabled buttons
-are configurable. Invalid menu data is backed up and repaired or replaced by an
-in-memory built-in default without changing `shardingbase.yml`. Menu holders are
-typed, clicks and drags are cancelled after plugin event dispatch, and every
-operation re-checks permission and feature state.
-
-## Security and controller configuration
-
-The node-to-proxy control plane uses TLS 1.3 with mandatory SHA-256 certificate
-pinning and per-node credentials. Frames are length-prefixed, versioned,
-checksummed, size-bounded, correlated, and replay-checked. The local
-backend-to-node hop is loopback-only and uses a random per-launch token.
-
-Velocity's generated configuration resembles:
+The Velocity JAR shades its SQLite JDBC driver, so no separate database driver is required. A representative configuration is:
 
 ```yaml
 control:
@@ -158,89 +108,117 @@ control:
   port: 8443
   keystore: tls.p12
   keystore-password: generated-secret
+  transaction-signing-key: generated-secret
 database: shardingbase.db
 node-credentials:
   node-a: generated-secret
   node-b: generated-secret
+remote-command-allowlist: []
+web:
+  bind: 0.0.0.0
+  port: 8080
+  tls-enabled: false
+  public-url: https://proxy.example.net:8080
 ```
 
-Keep the keystore password and node credentials secret. Expose only the control
-port needed by the two nodes, and use a private network or firewall allowlist in
-addition to TLS. Re-enroll a node whenever the certificate changes by updating
-its pinned fingerprint.
+The control listener uses TLS 1.3, certificate pinning, per-node credentials, bounded frames/queues, replay checks, checksums, timeouts, and correlated responses. Put the planner behind a trusted HTTPS reverse proxy and set `web.tls-enabled: false` as above; `public-url` describes the browser-facing URL independently of the listener transport. Direct planner TLS is available with `tls-enabled: true`, but the automatically generated certificate is self-signed for localhost/`127.0.0.1`, so a public hostname needs an explicitly trusted replacement keystore. The control and planner listeners need separate reachable allocations from Velocity's Minecraft port because they are separate TCP listeners.
 
-## Plugin compatibility and API
+Configure each node with:
 
-Local Bukkit, Spigot, and Paper plugins retain their normal loaders, descriptors,
-events, and API packages. A plugin running on one shard does not receive fake
-remote `World`, `Block`, `Entity`, or `Player` instances. Cross-shard work must
-use the asynchronous API:
+```text
+SHARDINGBASE_CONTROLLER_URI=tls://proxy.example.net:8443
+SHARDINGBASE_CERTIFICATE_SHA256=<fingerprint printed by Velocity>
+SHARDINGBASE_NODE_ID=node-a
+SHARDINGBASE_NODE_CREDENTIAL=<matching generated credential>
+SHARDINGBASE_TRANSACTION_KEY=<matching transaction-signing-key>
+SHARDINGBASE_BACKEND_MEMORY_MB=4096
+SHARDINGBASE_WORLD_ROOT=.
+SHARDINGBASE_BACKUP_ROOT=backups
+SHARDINGBASE_TRANSACTION_ROOT=shardingbase-transactions
+SHARDINGBASE_STAGING_ROOT=shardingbase-staging
+```
+
+Do not use `127.0.0.1` when Velocity is in another container; loopback points to the backend container itself.
+
+For Pterodactyl, import `distribution/pterodactyl/egg-shardingbase-node.json`, select Java 25, upload `server.jar`, and fill in the same settings. Container memory must cover backend heap, node heap, native/direct memory, and operating overhead.
+
+## Commands, state, and menus
+
+Operator commands are:
+
+- `/shardingbase` — identity, build, feature state, proxy, peer, and help;
+- `/shardingbase reload` — atomically reload Shardingbase identity/menu data and revalidate, without reloading Paper or plugins;
+- `/shardingbase sync` — open the player/world management GUI.
+
+Permissions `shardingbase.admin`, `shardingbase.reload`, and `shardingbase.sync` default to operators. Menu layouts are generated under `config/shardingbase_menus/` and validate titles, rows, materials, slots, lore, and enabled buttons.
+
+Feature states are:
+
+- `PENDING` while validation is running;
+- `ENABLED` after both authenticated backends have matching protocol, Minecraft, and Shardingbase versions;
+- `DISABLED` when distributed features are unavailable but ordinary Paper can safely continue;
+- `MAINTENANCE` when a sharded world cannot safely accept players or lose ownership enforcement.
+
+The player-data menu controls portable categories including inventory, equipment, ender chest, experience, health, hunger, effects, game mode/abilities, advancements, and statistics. Managed transfers use monotonically increasing SQLite revisions and ignore stale/duplicate state. The confirmed bulk action queues a one-way snapshot of every currently online player; offline player-file migration is not implemented in this prototype.
+
+## World planning and offline cut
+
+The world planner scans Anvil location tables without generating terrain, renders generated chunks, stores tiles in SQLite, and returns a one-use operator link. The browser selects X or Z, a chunk-aligned cut, and which backend owns each half.
+
+An immutable signed transaction then coordinates:
+
+1. matching backend/node/version and capacity preflight;
+2. maintenance mode, player removal, save/flush, and dual authorization;
+3. graceful child shutdown while the node remains online;
+4. mandatory complete backups and durable phase journals;
+5. terrain, entity, and POI region splitting, including negative regions and partial boundary files;
+6. resumable one-MiB relay with SHA-256 manifests and backpressure;
+7. target verification/atomic installation before source commitment;
+8. matching shard manifests, target-first restart, health checks, source restart, and finalization;
+9. rollback from retained backups on a mutating-phase failure.
+
+A committed world contains `shardingbase-shard.properties`. Runtime ownership clips ordinary chunk loads/tickets/generation to the local half, exposes `LOCAL`/`REMOTE` through the API, displays boundary warnings, and maintenance-locks a sharded backend when coordination is lost.
+
+This remains prototype code. Do not perform the first cut against the only copy of a production world, and do not delete retained transaction backups until both shards have been independently verified.
+
+## Shardingbase API and remote commands
+
+Plugins can keep using Paper APIs locally. Explicit remote block/entity work is asynchronous:
 
 ```java
 ShardingbaseService service = Shardingbase.service();
-Ownership owner = service.ownership(new WorldPosition("minecraft:overworld", 0, 64, 0));
+WorldPosition position = new WorldPosition("minecraft:overworld", 25_000, 64, 0);
+
 service.remoteOperations().readBlock(position).thenAccept(result -> {
-    // Handle Success, Timeout, Unavailable, ValidationFailure, or RemoteFailure.
+    // Success, Timeout, Unavailable, ValidationFailure, or RemoteFailure
 });
 ```
 
-The current prototype publishes the type-safe API and identity/peer status.
-Remote operation execution is not enabled yet and returns a typed unavailable
-result. Ordinary local plugin behavior remains unchanged.
+Remote operations are executed on the target server thread, correlated, bounded, deduplicated, and returned as typed results. Ordinary attempts to force-load an unowned chunk fail fast with a rate-limited diagnostic.
 
-## Prototype implementation status
+Velocity can expose a command root owned only by the peer when that root is explicitly listed in `remote-command-allowlist`. The local command always wins on conflicts. Remote execution uses a captured console-compatible sender and does not pretend a remote player object exists.
 
-Implemented and tested in this branch:
+## Verification
 
-- strict backend identity lifecycle, feature states, reload, permissions, and
-  `/shardingbase` commands;
-- four configurable GUI schemas and protected inventory interaction;
-- framed protocol validation, corruption/limit checks, replay window, pinned TLS,
-  per-node authentication, and SQLite uniqueness/version validation;
-- a self-extracting child-JVM node with distinct node/backend memory limits;
-- raw Anvil region splitting by X or Z chunk boundary for terrain, entities, and
-  POI data, including negative region coordinates;
-- dual transaction authorization, atomic phase journals, mandatory complete
-  backups with hash manifests, and non-destructive split preparation;
-- atomic shard manifests, real local/remote ownership lookup, and maintenance
-  locking when a sharded backend loses its controller;
-- monotonic SQLite player revisions plus bounded portable snapshot codecs for
-  every configurable data category;
-- asynchronous public API result types and peer/identity reporting;
-- representative Bukkit, legacy Spigot, and Paper fixture plugins, all verified
-  to load and enable together on the generated Shardingbase backend.
+Module and Paper compatibility gates:
 
-Not yet safe or wired end-to-end:
-
-- live player capture/apply hooks and paused Velocity handoff;
-- remote command catalog/execution and remote operation routing;
-- generated-chunk map tiles, HTTPS planner, and WebSocket sessions;
-- signed plans, mandatory full backup, relay, journal recovery, rollback, and
-  automated two-node restart for world transactions;
-- runtime chunk-boundary clipping, particle/border warnings, and automatic
-  coordinate-preserving crossing.
-
-The region splitter is a tested primitive, not authorization to mutate a live
-world. Do not use it manually against production data.
-
-## Development and verification
-
-Focused checks:
-
-```bash
-./gradlew :shardingbase-common:check :shardingbase-node:check :shardingbase-velocity:check
-./gradlew :paper-api:checkstyleMain :paper-server:compileJava
+```powershell
+.\gradlew.bat :shardingbase-common:check :shardingbase-node:check :shardingbase-velocity:check
+.\gradlew.bat :paper-api:checkstyleMain :paper-server:compileJava
 ```
 
-Paper source changes continue to use the patch workflow:
+Real plugin profiles (downloads are pinned and SHA-512 verified):
 
-```bash
-./gradlew applyPatches
-./gradlew fixupSourcePatches
-./gradlew rebuildPatches
+```powershell
+.\tests\run-plugin-matrix.ps1 -Profile core,worldedit,fawe
 ```
 
-Shardingbase retains Paper's licensing and contributor history. Verify defects on
-an unmodified Paper build before reporting them upstream; Shardingbase-specific
-issues belong in this repository. See `CONTRIBUTING.md`, `LICENSE.md`, and the
-[Paper documentation](https://docs.papermc.io/) for the compatible base platform.
+Real official Velocity plus two packaged nodes/backends:
+
+```powershell
+.\tests\run-network-smoke.ps1
+```
+
+The integration harness verifies controller TLS startup, shaded SQLite initialization, two persistent authenticated node sessions, both backend validations, and clean coordinated shutdown. It does not simulate a real Minecraft client, so live movement/handoff still requires an in-game acceptance test before production use.
+
+Paper source changes continue to use the paperweight patch workflow. Shardingbase retains Paper's licensing and contributor history; see `CONTRIBUTING.md`, `LICENSE.md`, and the [Paper documentation](https://docs.papermc.io/).

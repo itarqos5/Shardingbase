@@ -5,7 +5,7 @@
         "update_url": null
     },
     "exported_at": "2026-08-30T00:00:00+00:00",
-    "name": "Shardingbase Node",
+    "name": "Shardingbase Server",
     "author": "shardingbase@invalid.example",
     "description": "Runs the self-extracting Shardingbase node and its supervised Paper-compatible backend. Allocate enough container memory for BACKEND_MEMORY plus NODE_MEMORY and native overhead.",
     "features": [
@@ -26,17 +26,17 @@
     },
     "scripts": {
         "installation": {
-            "script": "#!\/bin\/ash\nset -eu\nmkdir -p \/mnt\/server\/backups\ncd \/mnt\/server\nif [ -n \"${SHARDINGBASE_DOWNLOAD_URL:-}\" ]; then\n    echo \"Downloading Shardingbase Node from the configured URL\"\n    curl --fail --location --output \"${SERVER_JARFILE}\" \"${SHARDINGBASE_DOWNLOAD_URL}\"\nelse\n    echo \"No download URL configured. Upload Shardingbase-Node.jar as ${SERVER_JARFILE} after installation.\"\nfi\n",
+            "script": "#!\/bin\/ash\nset -eu\nmkdir -p \/mnt\/server\/backups\ncd \/mnt\/server\nif [ -n \"${SHARDINGBASE_DOWNLOAD_URL:-}\" ]; then\n    echo \"Downloading Shardingbase server from the configured URL\"\n    curl --fail --location --output \"${SERVER_JARFILE}\" \"${SHARDINGBASE_DOWNLOAD_URL}\"\nelse\n    echo \"No download URL configured. Upload server.jar as ${SERVER_JARFILE} after installation.\"\nfi\n",
             "container": "ghcr.io\/pterodactyl\/installers:alpine",
             "entrypoint": "ash"
         }
     },
     "variables": [
         {
-            "name": "Node Jar File",
-            "description": "The uploaded self-extracting Shardingbase-Node jar.",
+            "name": "Server Jar File",
+            "description": "The uploaded self-extracting Shardingbase server jar.",
             "env_variable": "SERVER_JARFILE",
-            "default_value": "Shardingbase-Node.jar",
+            "default_value": "server.jar",
             "user_viewable": true,
             "user_editable": true,
             "rules": "required|regex:/^([\\w\\d._-]+)(\\.jar)$/",
@@ -60,16 +60,6 @@
             "user_viewable": true,
             "user_editable": true,
             "rules": "required|integer|min:512|max:131072",
-            "field_type": "text"
-        },
-        {
-            "name": "Extracted Backend Jar",
-            "description": "Plain filename used when the node exports its embedded backend beside itself.",
-            "env_variable": "SHARDINGBASE_BACKEND_JAR",
-            "default_value": "Shardingbase-backend.jar",
-            "user_viewable": true,
-            "user_editable": true,
-            "rules": "required|regex:/^([\\w\\d._-]+)(\\.jar)$/",
             "field_type": "text"
         },
         {
@@ -117,9 +107,19 @@
             "description": "Secret generated in the Velocity plugin configuration for this node.",
             "env_variable": "SHARDINGBASE_NODE_CREDENTIAL",
             "default_value": "",
-            "user_viewable": false,
-            "user_editable": false,
+            "user_viewable": true,
+            "user_editable": true,
             "rules": "nullable|string|max:255",
+            "field_type": "text"
+        },
+        {
+            "name": "World Transaction Key",
+            "description": "Secret shared with Velocity's transaction-signing-key. It authorizes signed world cut, transfer, and recovery operations.",
+            "env_variable": "SHARDINGBASE_TRANSACTION_KEY",
+            "default_value": "",
+            "user_viewable": false,
+            "user_editable": true,
+            "rules": "required|string|min:32|max:512",
             "field_type": "text"
         },
         {
@@ -140,16 +140,6 @@
             "user_viewable": true,
             "user_editable": false,
             "rules": "required|string|max:128",
-            "field_type": "text"
-        },
-        {
-            "name": "Backup Retention",
-            "description": "Number of completed transaction backups retained by node policy.",
-            "env_variable": "SHARDINGBASE_BACKUP_RETENTION",
-            "default_value": "3",
-            "user_viewable": true,
-            "user_editable": true,
-            "rules": "required|integer|min:1|max:30",
             "field_type": "text"
         },
         {
