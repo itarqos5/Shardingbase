@@ -171,7 +171,7 @@ public final class MapPlannerCodec {
     ) {
         public Create {
             if (sessionId == null || backendId == null || backendId.isBlank() || worldKey == null || worldKey.isBlank()
-                || worldDirectory == null || !worldDirectory.matches("[A-Za-z0-9._-]{1,255}")
+                || !RelativePathValidation.worldDirectory(worldDirectory)
                 || worldId == null || dataVersion < 1
                 || minChunkX > maxChunkX || minChunkZ > maxChunkZ || generatedChunks < 1 || estimatedBytes < 0) {
                 throw new IllegalArgumentException("Invalid map planner session");

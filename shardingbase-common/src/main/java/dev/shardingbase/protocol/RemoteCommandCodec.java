@@ -7,7 +7,7 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -165,7 +165,7 @@ public final class RemoteCommandCodec {
             if (backendId == null || backendId.isBlank() || labels == null) {
                 throw new IllegalArgumentException("Remote command catalog fields are required");
             }
-            final LinkedHashSet<String> normalized = new LinkedHashSet<>();
+            final Set<String> normalized = new HashSet<>();
             for (final String label : labels) {
                 if (label == null) {
                     throw new IllegalArgumentException("Invalid remote command label");

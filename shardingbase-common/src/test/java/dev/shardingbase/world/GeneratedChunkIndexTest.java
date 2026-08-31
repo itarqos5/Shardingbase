@@ -1,13 +1,13 @@
 package dev.shardingbase.world;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class GeneratedChunkIndexTest {
     @Test
@@ -22,7 +22,7 @@ class GeneratedChunkIndexTest {
         assertEquals(31, scan.maxChunkX());
         assertEquals(-32, scan.minChunkZ());
         assertEquals(95, scan.maxChunkZ());
-        assertEquals(4L * 4_096L, scan.estimatedBytes());
+        assertEquals(10L * 4_096L, scan.estimatedBytes());
     }
 
     private static void writeRegion(final Path path, final Entry... entries) throws Exception {

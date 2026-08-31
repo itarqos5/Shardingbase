@@ -24,7 +24,7 @@ class PlayerHandoffCodecTest {
         assertTrue(prepare.categories().contains(PlayerDataCategory.EXPERIENCE));
 
         final PlayerHandoffCodec.TransferDestination destination = new PlayerHandoffCodec.TransferDestination(
-            "minecraft:overworld", UUID.randomUUID(), 32.5, 70.0, -16.25, 90.0F, -12.0F
+            "minecraft:overworld", UUID.randomUUID(), 25_000.25, 70.0, -16.25, 90.0F, -12.0F
         );
         final PlayerHandoffCodec.Capture capture = PlayerHandoffCodec.decodeCapture(
             PlayerHandoffCodec.encodeCapture(new PlayerHandoffCodec.Capture(
@@ -80,6 +80,7 @@ class PlayerHandoffCodecTest {
             ))
         );
         assertEquals(destination, boundary.destination());
+        assertEquals(25_000.25, boundary.destination().x());
         assertEquals("backend-a", boundary.sourceBackendId());
 
         final PlayerHandoffCodec.BoundaryResponse boundaryResponse = PlayerHandoffCodec.decodeBoundaryResponse(

@@ -1,10 +1,10 @@
 package dev.shardingbase.protocol;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class RemoteOperationCodecTest {
     @Test

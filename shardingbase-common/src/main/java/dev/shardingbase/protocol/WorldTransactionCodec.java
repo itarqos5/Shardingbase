@@ -233,16 +233,7 @@ public final class WorldTransactionCodec {
     }
 
     private static boolean relativeWorldDirectory(final String value) {
-        if (value == null || value.isBlank() || value.startsWith("/") || value.contains("\\")
-            || !value.matches("[A-Za-z0-9._/-]{1,512}")) {
-            return false;
-        }
-        for (final String segment : value.split("/")) {
-            if (segment.isBlank() || ".".equals(segment) || "..".equals(segment)) {
-                return false;
-            }
-        }
-        return true;
+        return RelativePathValidation.worldDirectory(value);
     }
 
     public enum Operation {

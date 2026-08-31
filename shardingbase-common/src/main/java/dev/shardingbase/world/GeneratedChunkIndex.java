@@ -51,8 +51,10 @@ public final class GeneratedChunkIndex {
             }
             final ByteBuffer locations = ByteBuffer.allocate(LOCATION_TABLE_BYTES).order(ByteOrder.BIG_ENDIAN);
             try (FileChannel channel = FileChannel.open(region, StandardOpenOption.READ)) {
-                while (locations.hasRemaining() && channel.read(locations) >= 0) {
-                    // Read exactly the location table; timestamps and payloads are not needed.
+                while (locations.hasRemaining()) {
+                    if (channel.read(locations) < 0) {
+                        break;
+                    }
                 }
             }
             if (locations.position() != LOCATION_TABLE_BYTES) {
@@ -87,7 +89,58 @@ public final class GeneratedChunkIndex {
             minZ = Math.min(minZ, chunk.z());
             maxZ = Math.max(maxZ, chunk.z());
         }
+        final Path worldRoot = directory.getFileName() != null
+            && "region".equals(directory.getFileName().toString())
+            ? directory.getParent()
+            : directory;
+        estimatedBytes = Math.max(estimatedBytes, completeTransferBytes(worldRoot));
         return new Scan(List.copyOf(chunks), minX, maxX, minZ, maxZ, estimatedBytes);
+    }
+
+    private static long completeTransferBytes(final Path worldRoot) throws IOException {
+        long bytes = treeBytes(worldRoot);
+        Path current = worldRoot;
+        while (current != null) {
+            if (current.getFileName() != null && "dimensions".equals(current.getFileName().toString())) {
+                final Path container = current.getParent();
+                if (container != null) {
+                    for (final String name : List.of(
+                        "data", "datapacks", "generated", "icon.png", "level.dat", "level.dat_old"
+                    )) {
+                        final Path entry = container.resolve(name);
+                        if (Files.exists(entry)) {
+                            bytes = Math.addExact(bytes, treeBytes(entry));
+                        }
+                    }
+                }
+                break;
+            }
+            current = current.getParent();
+        }
+        return bytes;
+    }
+
+    private static long treeBytes(final Path root) throws IOException {
+        if (Files.isSymbolicLink(root)) {
+            throw new IOException("Symbolic links are not allowed in world storage estimates: " + root);
+        }
+        if (Files.isRegularFile(root)) {
+            return Files.size(root);
+        }
+        long bytes = 0L;
+        try (var paths = Files.walk(root)) {
+            for (final Path path : paths.toList()) {
+                if (Files.isSymbolicLink(path)) {
+                    throw new IOException("Symbolic links are not allowed in world storage estimates: " + path);
+                }
+                if (Files.isRegularFile(path)) {
+                    bytes = Math.addExact(bytes, Files.size(path));
+                }
+            }
+        } catch (final ArithmeticException exception) {
+            throw new IOException("World storage estimate exceeds the supported size", exception);
+        }
+        return bytes;
     }
 
     public record Chunk(int x, int z) {
